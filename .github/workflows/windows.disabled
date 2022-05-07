@@ -1,4 +1,4 @@
-name: Windows
+name: windows
 on:
   push:
     paths-ignore:
@@ -47,14 +47,6 @@ jobs:
         cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_GENERATOR_PLATFORM=x64 -DBUILD_ICU_EXTENSION=1 -DBUILD_PARQUET_EXTENSION=1 -DBUILD_TPCH_EXTENSION=1 -DBUILD_TPCDS_EXTENSION=1 -DBUILD_FTS_EXTENSION=1 -DBUILD_JSON_EXTENSION=1 -DBUILD_EXCEL_EXTENSION=1 -DBUILD_REST=1 -DJDBC_DRIVER=1 -DBUILD_VISUALIZER_EXTENSION=1 -DBUILD_ODBC_DRIVER=1 -DDISABLE_UNITY=1
         cmake --build . --config Release
 
-    - name: Test
-      run: test/Release/unittest.exe
-
-    - name: Tools Test
-      run: |
-        python tools/shell/shell-test.py Release/duckdb.exe
-        java -cp tools/jdbc/duckdb_jdbc.jar org.duckdb.test.TestDuckDBJDBC
-
     - name: Deploy
       run: |
         python scripts/amalgamation.py
@@ -96,13 +88,6 @@ jobs:
         cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_GENERATOR_PLATFORM=Win32 -DBUILD_ICU_EXTENSION=1 -DBUILD_PARQUET_EXTENSION=1 -DBUILD_TPCH_EXTENSION=1 -DBUILD_TPCDS_EXTENSION=1 -DBUILD_FTS_EXTENSION=1 -DBUILD_JSON_EXTENSION=1 -DBUILD_EXCEL_EXTENSION=1 -DJDBC_DRIVER=1 -DBUILD_VISUALIZER_EXTENSION=1
         cmake --build . --config Release
 
-    - name: Test
-      run: test/Release/unittest.exe
-
-    - name: Tools Test
-      run: |
-        python tools/shell/shell-test.py Release/duckdb.exe
-
     - name: Deploy
       run: |
         python scripts/amalgamation.py
@@ -143,11 +128,6 @@ jobs:
          run: |
            cmake -G "Ninja" -DCMAKE_BUILD_TYPE=Release -DBUILD_PARQUET_EXTENSION=1
            cmake --build . --config Release
-
-       - name: Test
-         run: |
-           cp src/libduckdb.dll .
-           test/unittest.exe
 
  odbc-win-64:
     name: ODBC Windows
@@ -191,12 +171,6 @@ jobs:
       run: |
         git clone https://github.com/hawkfish/psqlodbc.git
         (cd psqlodbc && git checkout 96f5683d68e4a288e76ee4b09737478cc592aa98 && make release)
-
-    - name: Test psqlodbc
-      run: |
-        cd psqlodbc
-        export PSQLODBC_TEST_DSN=DuckDB
-        build/release/Release/psql_odbc_test.exe -f ../tools/odbc/test/psql_supported_tests
 
     - name: Print ODBC trace on failure
       if: ${{ failure() }}
