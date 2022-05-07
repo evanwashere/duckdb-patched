@@ -1940,14 +1940,14 @@ DUCKDB_API void duckffi_disconnect(duckdb_connection *con);
 DUCKDB_API void duckffi_free_result(duckdb_result *result);
 DUCKDB_API void duckffi_free_prepare(duckdb_prepared_statement *prepare);
 
-DUCKDB_API duckdb_connection* duckffi_connect(duckdb_database* db);
-DUCKDB_API duckdb_database* duckffi_open(bool in_memory, const char* path);
+DUCKDB_API duckdb_connection duckffi_connect(duckdb_database* db);
+DUCKDB_API duckdb_database duckffi_open(bool in_memory, const char* path);
 DUCKDB_API duckdb_result* duckffi_query(duckdb_connection* con, const char* query);
 DUCKDB_API duckdb_result* duckffi_query_prepared(duckdb_prepared_statement* prepare);
-DUCKDB_API duckdb_prepared_statement* duckffi_prepare(duckdb_connection* con, const char* query);
+DUCKDB_API duckdb_prepared_statement duckffi_prepare(duckdb_connection* con, const char* query);
 
+DUCKDB_API void* duckffi_blob_data(duckdb_blob* blob);
 DUCKDB_API uint32_t duckffi_blob_size(duckdb_blob* blob);
-DUCKDB_API uint8_t* duckffi_blob_data(duckdb_blob* blob);
 DUCKDB_API uint32_t duckffi_row_count(duckdb_result* result);
 DUCKDB_API bool row_duckffi_count_large(duckdb_result* result);
 DUCKDB_API uint32_t duckffi_column_count(duckdb_result* result);
