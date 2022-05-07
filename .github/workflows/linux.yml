@@ -35,7 +35,7 @@ jobs:
     container: ubuntu:16.04
     env:
       GEN: ninja
-      BUILD_BENCHMARK: 1
+      BUILD_BENCHMARK: 0
       BUILD_ICU: 1
       BUILD_TPCH: 1
       BUILD_FTS: 1
@@ -53,15 +53,12 @@ jobs:
     - uses: ./.github/actions/ubuntu_16_setup
 
     - name: Build
-      run: STATIC_LIBCPP=1 BUILD_ODBC=1 make
+      run: STATIC_LIBCPP=1 BUILD_ODBC=0 make
 
     - name: Examples
       run: |
         (cd examples/embedded-c; make)
         (cd examples/embedded-c++; make)
-        (cd examples/jdbc; make; make maven)
-        build/release/benchmark/benchmark_runner benchmark/tpch/sf1/q01.benchmark
-        build/release/duckdb -c "COPY (SELECT 42) TO '/dev/stdout' (FORMAT PARQUET)" | cat
 
     - name: Deploy
       run: |
@@ -70,8 +67,7 @@ jobs:
         zip -j libduckdb-linux-amd64.zip build/release/src/libduckdb*.so src/amalgamation/duckdb.hpp src/include/duckdb.h
         zip -j libduckdb-src.zip src/amalgamation/duckdb.hpp src/amalgamation/duckdb.cpp src/include/duckdb.h
         zip -j duckdb_rest-linux-amd64.zip build/release/tools/rest/duckdb_rest_server
-        zip -j duckdb_odbc-linux-amd64.zip build/release/tools/odbc/libduckdb_odbc.so tools/odbc/linux_setup/unixodbc_setup.sh
-        python3.7 scripts/asset-upload-gha.py libduckdb-src.zip libduckdb-linux-amd64.zip duckdb_cli-linux-amd64.zip duckdb_rest-linux-amd64.zip duckdb_jdbc-linux-amd64.jar=build/release/tools/jdbc/duckdb_jdbc.jar duckdb_odbc-linux-amd64.zip
+        python3.7 scripts/asset-upload-gha.py libduckdb-src.zip libduckdb-linux-amd64.zip duckdb_cli-linux-amd64.zip duckdb_rest-linux-amd64.zip
 
     - uses: actions/upload-artifact@v2
       with:
@@ -79,7 +75,6 @@ jobs:
         path: |
           libduckdb-linux-amd64.zip
           duckdb_cli-linux-amd64.zip
-          build/release/tools/jdbc/duckdb_jdbc.jar
 
 
  linux-extensions-64:
