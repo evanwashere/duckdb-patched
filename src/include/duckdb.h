@@ -1949,7 +1949,7 @@ DUCKDB_API duckdb_prepared_statement duckffi_prepare(duckdb_connection* con, con
 DUCKDB_API void* duckffi_blob_data(duckdb_blob* blob);
 DUCKDB_API uint32_t duckffi_blob_size(duckdb_blob* blob);
 DUCKDB_API uint32_t duckffi_row_count(duckdb_result* result);
-DUCKDB_API bool row_duckffi_count_large(duckdb_result* result);
+DUCKDB_API bool duckffi_row_count_large(duckdb_result* result);
 DUCKDB_API uint32_t duckffi_column_count(duckdb_result* result);
 DUCKDB_API uint64_t duckffi_row_count_slow(duckdb_result* result);
 DUCKDB_API const char* duckffi_result_error(duckdb_result* result);
