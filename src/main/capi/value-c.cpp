@@ -160,9 +160,9 @@ static bool CanUseDeprecatedFetch(duckdb_result *result, idx_t col, idx_t row) {
 	if (!duckdb::deprecated_materialize_result(result)) {
 		return false;
 	}
-	if (col >= result->__deprecated_column_count || row >= result->__deprecated_row_count) {
-		return false;
-	}
+	// if (col >= result->__deprecated_column_count || row >= result->__deprecated_row_count) {
+		// return false;
+	// }
 	return true;
 }
 
