@@ -171,7 +171,7 @@ if(${CMAKE_SYSTEM_NAME} STREQUAL "SunOS")
 endif()
 
 execute_process(
-        COMMAND git log -1 --format=%h
+        COMMAND echo 9462bc223
         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
         RESULT_VARIABLE GIT_RESULT
         OUTPUT_VARIABLE GIT_COMMIT_HASH
