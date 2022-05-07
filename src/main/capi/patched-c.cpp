@@ -54,8 +54,8 @@ bool duckffi_bind_u64(duckdb_prepared_statement* prepare, uint32_t offset, uint6
 bool duckffi_bind_boolean(duckdb_prepared_statement* prepare, uint32_t offset, bool value) { return DuckDBError == duckdb_bind_boolean(prepare, 1 + offset, value); }
 bool duckffi_bind_blob(duckdb_prepared_statement* prepare, uint32_t offset, const void* value, uint32_t length) { return DuckDBError == duckdb_bind_blob(prepare, 1 + offset, value, length); }
 bool duckffi_bind_string(duckdb_prepared_statement* prepare, uint32_t offset, const char* value, uint32_t length) { return DuckDBError == duckdb_bind_varchar_length(prepare, 1 + offset, value, length); }
-bool duckffi_bind_timestamp(duckdb_prepared_statement* prepare, uint32_t offset, uint64_t value) { duckdb_timestamp timestamp = { .micros = 1000 * value }; return DuckDBError == duckdb_bind_timestamp(prepare, 1 + offset, timestamp); }
-bool duckffi_bind_interval(duckdb_prepared_statement* prepare, uint32_t offset, uint32_t ms, uint32_t days, uint32_t months) { duckdb_interval interval = { .days = days, .months = months, .micros = ms * 1000 }; return DuckDBError == duckdb_bind_interval(prepare, 1 + offset, interval); }
+bool duckffi_bind_timestamp(duckdb_prepared_statement* prepare, uint32_t offset, uint64_t value) { duckdb_timestamp timestamp; timestamp.micros = 1000 * value; return DuckDBError == duckdb_bind_timestamp(prepare, 1 + offset, timestamp); }
+bool duckffi_bind_interval(duckdb_prepared_statement* prepare, uint32_t offset, uint32_t ms, uint32_t days, uint32_t months) { duckdb_interval interval; interval.days = days; interval.months = months; interval.micros = ms * 1000; return DuckDBError == duckdb_bind_interval(prepare, 1 + offset, interval); }
 
 int8_t duckffi_value_i8(duckdb_result* result, uint32_t row, uint32_t column) { return duckdb_value_int8(result, column, row); }
 float duckffi_value_f32(duckdb_result* result, uint32_t row, uint32_t column) { return duckdb_value_float(result, column, row); }
