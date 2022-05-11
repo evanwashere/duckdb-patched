@@ -18,7 +18,6 @@ else ()
   set (CMAKE_CXX_STANDARD 11)
 endif ()
 
-
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
@@ -73,7 +72,7 @@ if(${FORCE_COLORED_OUTPUT})
   endif()
 endif()
 
-option("Enable address sanitizer." TRUE)
+option("Enable address sanitizer." FALSE)
 
 set(M32_FLAG "")
 if(FORCE_32_BIT)
@@ -82,10 +81,10 @@ endif()
 
 option(FORCE_WARN_UNUSED "Unused code objects lead to compiler warnings." FALSE)
 
-option(ENABLE_SANITIZER "Enable address sanitizer." TRUE)
+option(ENABLE_SANITIZER "Enable address sanitizer." FALSE)
 option(ENABLE_THREAD_SANITIZER "Enable thread sanitizer." FALSE)
-option(ENABLE_UBSAN "Enable undefined behavior sanitizer." TRUE)
-option(DISABLE_VPTR_SANITIZER "Disable vptr sanitizer; work-around for sanitizer false positive on Macbook M1" FALSE)
+option(ENABLE_UBSAN "Enable undefined behavior sanitizer." FALSE)
+option(DISABLE_VPTR_SANITIZER "Disable vptr sanitizer; work-around for sanitizer false positive on Macbook M1" TRUE)
 option(
   FORCE_SANITIZER
   "Forces building with sanitizers even if the Python and R modules are enabled."
@@ -155,7 +154,7 @@ if(${EXPLICIT_EXCEPTIONS})
   set(CXX_EXTRA "${CXX_EXTRA} -fexceptions")
 endif()
 
-option(OSX_BUILD_UNIVERSAL "Build both architectures on OSX and create a single binary containing both." FALSE)
+option(OSX_BUILD_UNIVERSAL "Build both architectures on OSX and create a single binary containing both." TRUE)
 if (OSX_BUILD_UNIVERSAL)
   if (NOT APPLE)
     error("This only makes sense on OSX")
@@ -239,14 +238,14 @@ option(USER_SPACE "Build the DuckDB Python in the user space" FALSE)
 option(FORCE_QUERY_LOG "If enabled, all queries will be logged to the specified path" OFF)
 
 option(BUILD_REST "Build the DuckDB REST server" FALSE)
-option(BUILD_SHELL "Build the DuckDB Shell and SQLite API Wrappers" TRUE)
+option(BUILD_SHELL "Build the DuckDB Shell and SQLite API Wrappers" FALSE)
 option(DISABLE_THREADS "Disable support for multi-threading" FALSE)
 option(CLANG_TIDY "Enable build for clang-tidy, this disables all source files excluding the core database. This does not produce a working build." FALSE)
-option(BUILD_UNITTESTS "Build the C++ Unit Tests." TRUE)
+option(BUILD_UNITTESTS "Build the C++ Unit Tests." FALSE)
 option(
   ASSERT_EXCEPTION
   "Throw an exception on an assert failing, instead of triggering a sigabort"
-  TRUE)
+  FALSE)
 option(FORCE_ASSERT "Enable checking of assertions, even in release mode" FALSE)
 
 option(TREAT_WARNINGS_AS_ERRORS "Treat warnings as errors" FALSE)
