@@ -1934,6 +1934,7 @@ Will return after `max_tasks` have been executed, or if there are no more tasks 
 */
 DUCKDB_API void duckdb_execute_tasks(duckdb_database database, idx_t max_tasks);
 
+DUCKDB_API void duckffi_free(void *ptr);
 DUCKDB_API void duckffi_dfree(void *ptr);
 DUCKDB_API void duckffi_close(duckdb_database db);
 DUCKDB_API void duckffi_free_blob(duckdb_blob* blob);
@@ -2021,6 +2022,8 @@ DUCKDB_API duckdb_blob* duckffi_value_blob_slow(duckdb_result* result, uint64_t 
 DUCKDB_API uint64_t duckffi_value_timestamp_ms_slow(duckdb_result* result, uint64_t row, uint32_t column);
 DUCKDB_API uint32_t duckffi_value_interval_days_slow(duckdb_result* result, uint64_t row, uint32_t column);
 DUCKDB_API uint32_t duckffi_value_interval_months_slow(duckdb_result* result, uint64_t row, uint32_t column);
+
+DUCKDB_API uint8_t* duckffi_null_bitmap(duckdb_result* result, uint32_t rows, uint32_t column);
 
 #ifdef __cplusplus
 }
