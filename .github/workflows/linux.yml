@@ -175,6 +175,11 @@ jobs:
         sudo apt-get update -y -qq && sudo apt-get install -y -qq ninja-build
         git clone https://github.com/raspberrypi/tools --depth=1 rpi-tools
 
+    - name: Setup Ccache
+      uses: hendrikmuhs/ccache-action@main
+      with:
+        key: ${{ github.job }}
+
     - name: Build
       run: |
         export TOOLCHAIN=`pwd`/rpi-tools
@@ -220,6 +225,11 @@ jobs:
     - name: Install
       run: sudo apt-get update -y -qq && sudo apt-get install -y -qq g++-4.8 binutils
 
+    - name: Setup Ccache
+      uses: hendrikmuhs/ccache-action@main
+      with:
+        key: ${{ github.job }}
+
     - name: Build
       run: make release
 
@@ -248,6 +258,11 @@ jobs:
     - name: Install
       run: sudo apt-get update -y -qq && sudo apt-get install -y -qq ninja-build
 
+    - name: Setup Ccache
+      uses: hendrikmuhs/ccache-action@main
+      with:
+        key: ${{ github.job }}
+
     - name: Build
       run: make relassert
 
@@ -268,6 +283,11 @@ jobs:
       with:
         python-version: '3.7'
 
+    - name: Setup Ccache
+      uses: hendrikmuhs/ccache-action@main
+      with:
+        key: ${{ github.job }}
+
  symbol-leakage:
     name: Symbol Leakage
     runs-on: ubuntu-20.04
@@ -282,6 +302,11 @@ jobs:
       with:
         python-version: '3.7'
 
+    - name: Setup Ccache
+      uses: hendrikmuhs/ccache-action@main
+      with:
+        key: ${{ github.job }}
+
     - name: Build
       run: make
 
@@ -293,6 +318,7 @@ jobs:
       BUILD_VISUALIZER: 1
       BUILD_HTTPFS: 1
       S3_TEST_SERVER_AVAILABLE: 1
+      GEN: ninja
 
     steps:
     - uses: actions/checkout@v3
@@ -303,9 +329,13 @@ jobs:
       with:
         python-version: '3.7'
 
-    - uses: actions/setup-node@v2
+    - name: Install Ninja
+      run: sudo apt-get update -y -qq && sudo apt-get install -y -qq ninja-build
+
+    - name: Setup Ccache
+      uses: hendrikmuhs/ccache-action@main
       with:
-        node-version: '16'
+        key: ${{ github.job }}
 
     - name: Build
       run: make

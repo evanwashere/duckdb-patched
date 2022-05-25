@@ -33,6 +33,7 @@
 #include "duckdb/planner/pragma_handler.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/execution/column_binding_resolver.hpp"
+#include "duckdb/parser/query_node/select_node.hpp"
 
 namespace duckdb {
 
@@ -210,7 +211,7 @@ unique_ptr<QueryResult> ClientContext::FetchResultInternal(ClientContextLock &lo
 		active_query->progress_bar.reset();
 		query_progress = -1;
 
-		// successfully compiled SELECT clause and it is the last statement
+		// successfully compiled SELECT clause, and it is the last statement
 		// return a StreamQueryResult so the client can call Fetch() on it and stream the result
 		auto stream_result = make_unique<StreamQueryResult>(pending.statement_type, pending.properties,
 		                                                    shared_from_this(), pending.types, pending.names);
@@ -218,8 +219,8 @@ unique_ptr<QueryResult> ClientContext::FetchResultInternal(ClientContextLock &lo
 		return move(stream_result);
 	}
 	// create a materialized result by continuously fetching
-	auto result =
-	    make_unique<MaterializedQueryResult>(pending.statement_type, pending.properties, pending.types, pending.names);
+	auto result = make_unique<MaterializedQueryResult>(pending.statement_type, pending.properties, pending.types,
+	                                                   pending.names, shared_from_this());
 	result->properties = pending.properties;
 	while (true) {
 		auto chunk = FetchInternal(lock, GetExecutor(), *result);
@@ -646,7 +647,7 @@ unique_ptr<QueryResult> ClientContext::Query(const string &query, bool allow_str
 		vector<LogicalType> types;
 		vector<string> names;
 		return make_unique<MaterializedQueryResult>(StatementType::INVALID_STATEMENT, properties, move(types),
-		                                            move(names));
+		                                            move(names), shared_from_this());
 	}
 
 	unique_ptr<QueryResult> result;
@@ -741,14 +742,16 @@ void ClientContext::DisableProfiling() {
 }
 
 struct VerifyStatement {
-	VerifyStatement(unique_ptr<SelectStatement> statement_p, string statement_name_p, bool require_equality = true)
+	VerifyStatement(unique_ptr<SelectStatement> statement_p, string statement_name_p, bool require_equality = true,
+	                bool disable_optimizer = false)
 	    : statement(move(statement_p)), statement_name(move(statement_name_p)), require_equality(require_equality),
-	      select_list(statement->node->GetSelectList()) {
+	      disable_optimizer(disable_optimizer), select_list(statement->node->GetSelectList()) {
 	}
 
 	unique_ptr<SelectStatement> statement;
 	string statement_name;
 	bool require_equality;
+	bool disable_optimizer;
 	const vector<unique_ptr<ParsedExpression>> &select_list;
 };
 
@@ -776,8 +779,9 @@ string ClientContext::VerifyQuery(ClientContextLock &lock, const string &query, 
 	BufferedDeserializer source(serializer);
 	auto deserialized_stmt = SelectStatement::Deserialize(source);
 
+	auto query_str = select_stmt->ToString();
 	Parser parser;
-	parser.ParseQuery(select_stmt->ToString());
+	parser.ParseQuery(query_str);
 	D_ASSERT(parser.statements.size() == 1);
 	D_ASSERT(parser.statements[0]->type == StatementType::SELECT_STATEMENT);
 	auto parsed_statement = move(parser.statements[0]);
@@ -788,6 +792,8 @@ string ClientContext::VerifyQuery(ClientContextLock &lock, const string &query, 
 	verify_statements.emplace_back(move(deserialized_stmt), "Deserialized statement");
 	verify_statements.emplace_back(unique_ptr_cast<SQLStatement, SelectStatement>(move(parsed_statement)),
 	                               "Parsed statement", false);
+	verify_statements.emplace_back(unique_ptr_cast<SQLStatement, SelectStatement>(move(unoptimized_stmt)),
+	                               "Unoptimized", true, true);
 
 	// all the statements should be equal
 	for (idx_t i = 1; i < verify_statements.size(); i++) {
@@ -852,9 +858,11 @@ string ClientContext::VerifyQuery(ClientContextLock &lock, const string &query, 
 	auto statement_copy_for_explain = select_stmt->Copy();
 
 	// execute the original statement
+	auto optimizer_enabled = config.enable_optimizer;
 	vector<unique_ptr<MaterializedQueryResult>> results;
 	for (idx_t i = 0; i < verify_statements.size(); i++) {
 		interrupted = false;
+		config.enable_optimizer = !verify_statements[i].disable_optimizer;
 		try {
 			auto result = RunStatementInternal(lock, query, move(verify_statements[i].statement), false, false);
 			results.push_back(unique_ptr_cast<QueryResult, MaterializedQueryResult>(move(result)));
@@ -862,6 +870,7 @@ string ClientContext::VerifyQuery(ClientContextLock &lock, const string &query, 
 			results.push_back(make_unique<MaterializedQueryResult>(ex.what()));
 		}
 	}
+	config.enable_optimizer = optimizer_enabled;
 
 	// check explain, only if q does not already contain EXPLAIN
 	if (results[0]->success) {
@@ -873,8 +882,6 @@ string ClientContext::VerifyQuery(ClientContextLock &lock, const string &query, 
 			return "EXPLAIN failed but query did not (" + string(ex.what()) + ")";
 		} // LCOV_EXCL_STOP
 	}
-
-	config.enable_optimizer = true;
 
 	if (profiling_is_enabled) {
 		config.enable_profiler = true;
