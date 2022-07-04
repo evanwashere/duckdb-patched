@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 2.8.12)
+cmake_minimum_required(VERSION 3.9)
 
 if(POLICY CMP0026)
   cmake_policy(SET CMP0026 NEW)
@@ -12,8 +12,9 @@ if(POLICY CMP0054)
   cmake_policy(SET CMP0054 NEW)
 endif()
 
-project(DuckDB)
 
+project(DuckDB)
+include(CheckIPOSupported)
 find_package(Threads REQUIRED)
 
 if (CMAKE_VERSION VERSION_LESS "3.1")
@@ -28,7 +29,11 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_MACOSX_RPATH 1)
 set(CMAKE_VERBOSE_MAKEFILE OFF)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
-set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
+
+check_ipo_supported(RESULT result)
+if(result)
+  set_property(GLOBAL PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
+endif()
 
 find_program(CCACHE_PROGRAM ccache)
 if(CCACHE_PROGRAM)
@@ -187,7 +192,7 @@ if(${CMAKE_SYSTEM_NAME} STREQUAL "SunOS")
 endif()
 
 execute_process(
-        COMMAND echo a25b6e307
+        COMMAND echo 4d39f040c
         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
         RESULT_VARIABLE GIT_RESULT
         OUTPUT_VARIABLE GIT_COMMIT_HASH
