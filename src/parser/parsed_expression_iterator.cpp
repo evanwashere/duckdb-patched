@@ -114,6 +114,9 @@ void ParsedExpressionIterator::EnumerateChildren(
 		for (auto &child : window_expr.children) {
 			callback(child);
 		}
+		if (window_expr.filter_expr) {
+			callback(window_expr.filter_expr);
+		}
 		if (window_expr.start_expr) {
 			callback(window_expr.start_expr);
 		}
@@ -277,7 +280,7 @@ void ParsedExpressionIterator::EnumerateQueryNodeChildren(
 		EnumerateQueryNodeModifiers(node, callback);
 	}
 
-	for (auto &kv : node.cte_map) {
+	for (auto &kv : node.cte_map.map) {
 		EnumerateQueryNodeChildren(*kv.second->query->node, callback);
 	}
 }
