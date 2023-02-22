@@ -16,6 +16,7 @@ endif()
 project(DuckDB)
 include(CheckIPOSupported)
 find_package(Threads REQUIRED)
+set (GIT_COMMIT_HASH "6b7362d2c")
 
 if (CMAKE_VERSION VERSION_LESS "3.1")
     set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
@@ -82,7 +83,7 @@ if (EXTENSION_STATIC_BUILD AND "${CMAKE_CXX_COMPILER_ID}" STREQUAL "GNU")
   endif()
 endif()
 
-option(DISABLE_UNITY "Disable unity builds." FALSE)
+option(DISABLE_UNITY "Disable unity builds." TRUE)
 
 option(FORCE_COLORED_OUTPUT
        "Always produce ANSI-colored output (GNU/Clang only)." FALSE)
