@@ -33,6 +33,26 @@ struct CountStarFunction : public BaseCountFunction {
 	static void ConstantOperation(STATE *state, AggregateInputData &, idx_t count) {
 		*state += count;
 	}
+
+	template <typename RESULT_TYPE>
+	static void Window(Vector inputs[], const ValidityMask &filter_mask, AggregateInputData &aggr_input_data,
+	                   idx_t input_count, data_ptr_t state, const FrameBounds &frame, const FrameBounds &prev,
+	                   Vector &result, idx_t rid, idx_t bias) {
+		D_ASSERT(input_count == 0);
+		auto data = FlatVector::GetData<RESULT_TYPE>(result);
+		const auto begin = frame.first;
+		const auto end = frame.second;
+		// Slice to any filtered rows
+		if (!filter_mask.AllValid()) {
+			RESULT_TYPE filtered = 0;
+			for (auto i = begin; i < end; ++i) {
+				filtered += filter_mask.RowIsValid(i);
+			}
+			data[rid] = filtered;
+		} else {
+			data[rid] = end - begin;
+		}
+	}
 };
 
 struct CountFunction : public BaseCountFunction {
@@ -56,19 +76,33 @@ AggregateFunction CountFun::GetFunction() {
 	auto fun = AggregateFunction::UnaryAggregate<int64_t, int64_t, int64_t, CountFunction>(
 	    LogicalType(LogicalTypeId::ANY), LogicalType::BIGINT);
 	fun.name = "count";
+	fun.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
 	return fun;
+}
+
+static void CountStarSerialize(FieldWriter &writer, const FunctionData *bind_data, const AggregateFunction &function) {
+}
+
+static unique_ptr<FunctionData> CountStarDeserialize(ClientContext &context, FieldReader &reader,
+                                                     AggregateFunction &function) {
+	return nullptr;
 }
 
 AggregateFunction CountStarFun::GetFunction() {
 	auto fun = AggregateFunction::NullaryAggregate<int64_t, int64_t, CountStarFunction>(LogicalType::BIGINT);
 	fun.name = "count_star";
+	fun.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+	fun.window = CountStarFunction::Window<int64_t>;
+	// TODO is there a better way to set those?
+	fun.serialize = CountStarSerialize;
+	fun.deserialize = CountStarDeserialize;
 	return fun;
 }
 
 unique_ptr<BaseStatistics> CountPropagateStats(ClientContext &context, BoundAggregateExpression &expr,
                                                FunctionData *bind_data, vector<unique_ptr<BaseStatistics>> &child_stats,
                                                NodeStatistics *node_stats) {
-	if (!expr.distinct && child_stats[0] && !child_stats[0]->CanHaveNull()) {
+	if (!expr.IsDistinct() && child_stats[0] && !child_stats[0]->CanHaveNull()) {
 		// count on a column without null values: use count star
 		expr.function = CountStarFun::GetFunction();
 		expr.function.name = "count_star";
@@ -85,6 +119,7 @@ void CountFun::RegisterFunction(BuiltinFunctions &set) {
 	// the count function can also be called without arguments
 	count_function.arguments.clear();
 	count_function.statistics = nullptr;
+	count_function.window = CountStarFunction::Window<int64_t>;
 	count.AddFunction(count_function);
 	set.AddFunction(count);
 }

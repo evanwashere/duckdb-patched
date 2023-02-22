@@ -1,20 +1,16 @@
-#include "duckdb/function/scalar/date_functions.hpp"
-
-#include "duckdb/planner/expression/bound_function_expression.hpp"
-
-#include "duckdb/common/types/date.hpp"
-#include "duckdb/common/types/time.hpp"
-#include "duckdb/common/types/timestamp.hpp"
-#include "duckdb/common/types/cast_helpers.hpp"
+#include "duckdb/function/scalar/strftime.hpp"
 
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/to_string.hpp"
-
-#include "duckdb/function/scalar/strftime.hpp"
-
+#include "duckdb/common/types/cast_helpers.hpp"
+#include "duckdb/common/types/date.hpp"
+#include "duckdb/common/types/time.hpp"
+#include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/common/vector_operations/unary_executor.hpp"
-
 #include "duckdb/execution/expression_executor.hpp"
+#include "duckdb/function/scalar/date_functions.hpp"
+#include "duckdb/planner/expression/bound_function_expression.hpp"
+#include "duckdb/planner/expression/bound_parameter_expression.hpp"
 
 #include <cctype>
 
@@ -51,11 +47,11 @@ idx_t StrfTimepecifierSize(StrTimeSpecifier specifier) {
 
 void StrTimeFormat::AddLiteral(string literal) {
 	constant_size += literal.size();
-	literals.push_back(move(literal));
+	literals.push_back(std::move(literal));
 }
 
 void StrTimeFormat::AddFormatSpecifier(string preceding_literal, StrTimeSpecifier specifier) {
-	AddLiteral(move(preceding_literal));
+	AddLiteral(std::move(preceding_literal));
 	specifiers.push_back(specifier);
 }
 
@@ -69,7 +65,7 @@ void StrfTimeFormat::AddFormatSpecifier(string preceding_literal, StrTimeSpecifi
 		// constant size specifier
 		constant_size += specifier_size;
 	}
-	StrTimeFormat::AddFormatSpecifier(move(preceding_literal), specifier);
+	StrTimeFormat::AddFormatSpecifier(std::move(preceding_literal), specifier);
 }
 
 idx_t StrfTimeFormat::GetSpecifierLength(StrTimeSpecifier specifier, date_t date, dtime_t time, int32_t utc_offset,
@@ -81,7 +77,12 @@ idx_t StrfTimeFormat::GetSpecifierLength(StrTimeSpecifier specifier, date_t date
 		return Date::MONTH_NAMES[Date::ExtractMonth(date) - 1].GetSize();
 	case StrTimeSpecifier::YEAR_DECIMAL: {
 		auto year = Date::ExtractYear(date);
-		return NumericHelper::SignedLength<int32_t, uint32_t>(year);
+		// Be consistent with WriteStandardSpecifier
+		if (0 <= year && year <= 9999) {
+			return 4;
+		} else {
+			return NumericHelper::SignedLength<int32_t, uint32_t>(year);
+		}
 	}
 	case StrTimeSpecifier::MONTH_DECIMAL: {
 		idx_t len = 1;
@@ -133,7 +134,7 @@ idx_t StrfTimeFormat::GetSpecifierLength(StrTimeSpecifier specifier, date_t date
 	case StrTimeSpecifier::DAY_OF_YEAR_DECIMAL:
 		return NumericHelper::UnsignedLength<uint32_t>(Date::ExtractDayOfTheYear(date));
 	case StrTimeSpecifier::YEAR_WITHOUT_CENTURY:
-		return NumericHelper::UnsignedLength<uint32_t>(Date::ExtractYear(date) % 100);
+		return NumericHelper::UnsignedLength<uint32_t>(AbsValue(Date::ExtractYear(date)) % 100);
 	default:
 		throw InternalException("Unimplemented specifier for GetSpecifierLength");
 	}
@@ -258,7 +259,7 @@ char *StrfTimeFormat::WriteDateSpecifier(StrTimeSpecifier specifier, date_t date
 }
 
 char *StrfTimeFormat::WriteStandardSpecifier(StrTimeSpecifier specifier, int32_t data[], const char *tz_name,
-                                             char *target) {
+                                             size_t tz_len, char *target) {
 	// data contains [0] year, [1] month, [2] day, [3] hour, [4] minute, [5] second, [6] msec, [7] utc
 	switch (specifier) {
 	case StrTimeSpecifier::DAY_OF_MONTH_PADDED:
@@ -337,7 +338,7 @@ char *StrfTimeFormat::WriteStandardSpecifier(StrTimeSpecifier specifier, int32_t
 	}
 	case StrTimeSpecifier::TZ_NAME:
 		if (tz_name) {
-			strcpy(target, tz_name);
+			memcpy(target, tz_name, tz_len);
 			target += strlen(tz_name);
 		}
 		break;
@@ -350,7 +351,7 @@ char *StrfTimeFormat::WriteStandardSpecifier(StrTimeSpecifier specifier, int32_t
 		break;
 	}
 	case StrTimeSpecifier::YEAR_WITHOUT_CENTURY: {
-		target = Write2(target, data[0] % 100);
+		target = Write2(target, AbsValue(data[0]) % 100);
 		break;
 	}
 	case StrTimeSpecifier::HOUR_24_DECIMAL: {
@@ -390,7 +391,8 @@ void StrfTimeFormat::FormatString(date_t date, int32_t data[8], const char *tz_n
 		if (is_date_specifier[i]) {
 			target = WriteDateSpecifier(specifiers[i], date, target);
 		} else {
-			target = WriteStandardSpecifier(specifiers[i], data, tz_name, target);
+			auto tz_len = tz_name ? strlen(tz_name) : 0;
+			target = WriteStandardSpecifier(specifiers[i], data, tz_name, tz_len, target);
 		}
 	}
 	// copy the final literal into the target
@@ -565,11 +567,11 @@ string StrTimeFormat::ParseFormatSpecifier(const string &format_string, StrTimeF
 					string error = StrTimeFormat::ParseFormatSpecifier(subformat, locale_format);
 					D_ASSERT(error.empty());
 					// add the previous literal to the first literal of the subformat
-					locale_format.literals[0] = move(current_literal) + locale_format.literals[0];
+					locale_format.literals[0] = std::move(current_literal) + locale_format.literals[0];
 					current_literal = "";
 					// now push the subformat into the current format specifier
 					for (idx_t i = 0; i < locale_format.specifiers.size(); i++) {
-						format.AddFormatSpecifier(move(locale_format.literals[i]), locale_format.specifiers[i]);
+						format.AddFormatSpecifier(std::move(locale_format.literals[i]), locale_format.specifiers[i]);
 					}
 					pos = i + 1;
 					continue;
@@ -578,7 +580,7 @@ string StrTimeFormat::ParseFormatSpecifier(const string &format_string, StrTimeF
 					return "Unrecognized format for strftime/strptime: %" + string(1, format_char);
 				}
 			}
-			format.AddFormatSpecifier(move(current_literal), specifier);
+			format.AddFormatSpecifier(std::move(current_literal), specifier);
 			current_literal = "";
 			pos = i + 1;
 		}
@@ -587,20 +589,21 @@ string StrTimeFormat::ParseFormatSpecifier(const string &format_string, StrTimeF
 	if (pos < format_string.size()) {
 		current_literal += format_string.substr(pos, format_string.size() - pos);
 	}
-	format.AddLiteral(move(current_literal));
+	format.AddLiteral(std::move(current_literal));
 	return string();
 }
 
 struct StrfTimeBindData : public FunctionData {
-	explicit StrfTimeBindData(StrfTimeFormat format_p, string format_string_p)
-	    : format(move(format_p)), format_string(move(format_string_p)) {
+	explicit StrfTimeBindData(StrfTimeFormat format_p, string format_string_p, bool is_null)
+	    : format(std::move(format_p)), format_string(std::move(format_string_p)), is_null(is_null) {
 	}
 
 	StrfTimeFormat format;
 	string format_string;
+	bool is_null;
 
 	unique_ptr<FunctionData> Copy() const override {
-		return make_unique<StrfTimeBindData>(format, format_string);
+		return make_unique<StrfTimeBindData>(format, format_string, is_null);
 	}
 
 	bool Equals(const FunctionData &other_p) const override {
@@ -612,19 +615,25 @@ struct StrfTimeBindData : public FunctionData {
 template <bool REVERSED>
 static unique_ptr<FunctionData> StrfTimeBindFunction(ClientContext &context, ScalarFunction &bound_function,
                                                      vector<unique_ptr<Expression>> &arguments) {
-	if (!arguments[REVERSED ? 0 : 1]->IsFoldable()) {
+	auto format_idx = REVERSED ? 0 : 1;
+	auto &format_arg = arguments[format_idx];
+	if (format_arg->HasParameter()) {
+		throw ParameterNotResolvedException();
+	}
+	if (!format_arg->IsFoldable()) {
 		throw InvalidInputException("strftime format must be a constant");
 	}
-	Value options_str = ExpressionExecutor::EvaluateScalar(*arguments[REVERSED ? 0 : 1]);
+	Value options_str = ExpressionExecutor::EvaluateScalar(context, *format_arg);
 	auto format_string = options_str.GetValue<string>();
 	StrfTimeFormat format;
-	if (!options_str.IsNull()) {
+	bool is_null = options_str.IsNull();
+	if (!is_null) {
 		string error = StrTimeFormat::ParseFormatSpecifier(format_string, format);
 		if (!error.empty()) {
 			throw InvalidInputException("Failed to parse format specifier %s: %s", format_string, error);
 		}
 	}
-	return make_unique<StrfTimeBindData>(format, format_string);
+	return make_unique<StrfTimeBindData>(format, format_string, is_null);
 }
 
 void StrfTimeFormat::ConvertDateVector(Vector &input, Vector &result, idx_t count) {
@@ -651,7 +660,7 @@ static void StrfTimeFunctionDate(DataChunk &args, ExpressionState &state, Vector
 	auto &func_expr = (BoundFunctionExpression &)state.expr;
 	auto &info = (StrfTimeBindData &)*func_expr.bind_info;
 
-	if (ConstantVector::IsNull(args.data[REVERSED ? 0 : 1])) {
+	if (info.is_null) {
 		result.SetVectorType(VectorType::CONSTANT_VECTOR);
 		ConstantVector::SetNull(result, true);
 		return;
@@ -685,7 +694,7 @@ static void StrfTimeFunctionTimestamp(DataChunk &args, ExpressionState &state, V
 	auto &func_expr = (BoundFunctionExpression &)state.expr;
 	auto &info = (StrfTimeBindData &)*func_expr.bind_info;
 
-	if (ConstantVector::IsNull(args.data[REVERSED ? 0 : 1])) {
+	if (info.is_null) {
 		result.SetVectorType(VectorType::CONSTANT_VECTOR);
 		ConstantVector::SetNull(result, true);
 		return;
@@ -697,23 +706,23 @@ void StrfTimeFun::RegisterFunction(BuiltinFunctions &set) {
 	ScalarFunctionSet strftime("strftime");
 
 	strftime.AddFunction(ScalarFunction({LogicalType::DATE, LogicalType::VARCHAR}, LogicalType::VARCHAR,
-	                                    StrfTimeFunctionDate<false>, false, false, StrfTimeBindFunction<false>));
+	                                    StrfTimeFunctionDate<false>, StrfTimeBindFunction<false>));
 
 	strftime.AddFunction(ScalarFunction({LogicalType::TIMESTAMP, LogicalType::VARCHAR}, LogicalType::VARCHAR,
-	                                    StrfTimeFunctionTimestamp<false>, false, false, StrfTimeBindFunction<false>));
+	                                    StrfTimeFunctionTimestamp<false>, StrfTimeBindFunction<false>));
 
 	strftime.AddFunction(ScalarFunction({LogicalType::VARCHAR, LogicalType::DATE}, LogicalType::VARCHAR,
-	                                    StrfTimeFunctionDate<true>, false, false, StrfTimeBindFunction<true>));
+	                                    StrfTimeFunctionDate<true>, StrfTimeBindFunction<true>));
 
 	strftime.AddFunction(ScalarFunction({LogicalType::VARCHAR, LogicalType::TIMESTAMP}, LogicalType::VARCHAR,
-	                                    StrfTimeFunctionTimestamp<true>, false, false, StrfTimeBindFunction<true>));
+	                                    StrfTimeFunctionTimestamp<true>, StrfTimeBindFunction<true>));
 
 	set.AddFunction(strftime);
 }
 
 void StrpTimeFormat::AddFormatSpecifier(string preceding_literal, StrTimeSpecifier specifier) {
 	numeric_width.push_back(NumericSpecifierWidth(specifier));
-	StrTimeFormat::AddFormatSpecifier(move(preceding_literal), specifier);
+	StrTimeFormat::AddFormatSpecifier(std::move(preceding_literal), specifier);
 }
 
 int StrpTimeFormat::NumericSpecifierWidth(StrTimeSpecifier specifier) {
@@ -1093,8 +1102,8 @@ bool StrpTimeFormat::Parse(string_t str, ParseResult &result) {
 					pos++;
 				}
 				const auto tz_begin = data + pos;
-				// stop when we encounter a space or the end of the string
-				while (pos < size && !StringUtil::CharacterIsSpace(data[pos])) {
+				// stop when we encounter a non-tz character
+				while (pos < size && Timestamp::CharacterIsTimeZone(data[pos])) {
 					pos++;
 				}
 				const auto tz_end = data + pos;
@@ -1179,7 +1188,7 @@ bool StrpTimeFormat::Parse(string_t str, ParseResult &result) {
 
 struct StrpTimeBindData : public FunctionData {
 	explicit StrpTimeBindData(StrpTimeFormat format_p, string format_string_p)
-	    : format(move(format_p)), format_string(move(format_string_p)) {
+	    : format(std::move(format_p)), format_string(std::move(format_string_p)) {
 	}
 
 	StrpTimeFormat format;
@@ -1197,10 +1206,13 @@ struct StrpTimeBindData : public FunctionData {
 
 static unique_ptr<FunctionData> StrpTimeBindFunction(ClientContext &context, ScalarFunction &bound_function,
                                                      vector<unique_ptr<Expression>> &arguments) {
+	if (arguments[1]->HasParameter()) {
+		throw ParameterNotResolvedException();
+	}
 	if (!arguments[1]->IsFoldable()) {
 		throw InvalidInputException("strptime format must be a constant");
 	}
-	Value options_str = ExpressionExecutor::EvaluateScalar(*arguments[1]);
+	Value options_str = ExpressionExecutor::EvaluateScalar(context, *arguments[1]);
 	string format_string = options_str.ToString();
 	StrpTimeFormat format;
 	if (!options_str.IsNull()) {
@@ -1310,8 +1322,10 @@ static void StrpTimeFunction(DataChunk &args, ExpressionState &state, Vector &re
 void StrpTimeFun::RegisterFunction(BuiltinFunctions &set) {
 	ScalarFunctionSet strptime("strptime");
 
-	strptime.AddFunction(ScalarFunction({LogicalType::VARCHAR, LogicalType::VARCHAR}, LogicalType::TIMESTAMP,
-	                                    StrpTimeFunction, false, false, StrpTimeBindFunction));
+	auto fun = ScalarFunction({LogicalType::VARCHAR, LogicalType::VARCHAR}, LogicalType::TIMESTAMP, StrpTimeFunction,
+	                          StrpTimeBindFunction);
+	fun.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+	strptime.AddFunction(fun);
 
 	set.AddFunction(strptime);
 }

@@ -24,7 +24,7 @@ class FieldReader;
 class Vector;
 class ValidityStatistics;
 class DistinctStatistics;
-struct VectorData;
+struct UnifiedVectorFormat;
 
 enum StatisticsType { LOCAL_STATS = 0, GLOBAL_STATS = 1 };
 
@@ -46,8 +46,8 @@ public:
 public:
 	static unique_ptr<BaseStatistics> CreateEmpty(LogicalType type, StatisticsType stats_type);
 
-	bool CanHaveNull() const;
-	bool CanHaveNoNull() const;
+	DUCKDB_API bool CanHaveNull() const;
+	DUCKDB_API bool CanHaveNoNull() const;
 
 	void UpdateDistinctStatistics(Vector &v, idx_t count);
 
@@ -62,6 +62,8 @@ public:
 
 	virtual void Serialize(Serializer &serializer) const;
 	virtual void Serialize(FieldWriter &writer) const;
+
+	virtual idx_t GetDistinctCount();
 
 	static unique_ptr<BaseStatistics> Deserialize(Deserializer &source, LogicalType type);
 

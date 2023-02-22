@@ -9,9 +9,18 @@ unique_ptr<PhysicalOperator> PhysicalPlanGenerator::CreatePlan(LogicalOrder &op)
 
 	auto plan = CreatePlan(*op.children[0]);
 	if (!op.orders.empty()) {
-		auto order = make_unique<PhysicalOrder>(op.types, move(op.orders), op.estimated_cardinality);
-		order->children.push_back(move(plan));
-		plan = move(order);
+		vector<idx_t> projections;
+		if (op.projections.empty()) {
+			for (idx_t i = 0; i < plan->types.size(); i++) {
+				projections.push_back(i);
+			}
+		} else {
+			projections = std::move(op.projections);
+		}
+		auto order = make_unique<PhysicalOrder>(op.types, std::move(op.orders), std::move(projections),
+		                                        op.estimated_cardinality);
+		order->children.push_back(std::move(plan));
+		plan = std::move(order);
 	}
 	return plan;
 }

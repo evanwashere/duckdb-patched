@@ -11,6 +11,7 @@
 #include "duckdb/function/aggregate_function.hpp"
 #include "duckdb/function/function_set.hpp"
 #include "duckdb/common/types/null_value.hpp"
+#include "duckdb/function/built_in_functions.hpp"
 
 namespace duckdb {
 
@@ -92,6 +93,7 @@ struct MinByFun {
 
 struct SumFun {
 	static AggregateFunction GetSumAggregate(PhysicalType type);
+	static AggregateFunction GetSumAggregateNoOverflow(PhysicalType type);
 	static void RegisterFunction(BuiltinFunctions &set);
 };
 

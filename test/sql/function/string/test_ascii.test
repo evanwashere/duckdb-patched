@@ -2,8 +2,8 @@
 # description: test ascii() and chr() functions
 # group: [string]
 
-#statement ok
-#PRAGMA enable_verification
+statement ok
+PRAGMA enable_verification
 
 # Some ascii checks
 query I

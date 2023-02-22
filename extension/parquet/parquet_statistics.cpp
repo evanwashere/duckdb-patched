@@ -23,20 +23,22 @@ static unique_ptr<BaseStatistics> CreateNumericStats(const LogicalType &type,
 	// for reasons unknown to science, Parquet defines *both* `min` and `min_value` as well as `max` and
 	// `max_value`. All are optional. such elegance.
 	if (parquet_stats.__isset.min) {
-		stats->min = ParquetStatisticsUtils::ConvertValue(type, schema_ele, parquet_stats.min).CastAs(type);
+		stats->min = ParquetStatisticsUtils::ConvertValue(type, schema_ele, parquet_stats.min).DefaultCastAs(type);
 	} else if (parquet_stats.__isset.min_value) {
-		stats->min = ParquetStatisticsUtils::ConvertValue(type, schema_ele, parquet_stats.min_value).CastAs(type);
+		stats->min =
+		    ParquetStatisticsUtils::ConvertValue(type, schema_ele, parquet_stats.min_value).DefaultCastAs(type);
 	} else {
 		stats->min = Value(type);
 	}
 	if (parquet_stats.__isset.max) {
-		stats->max = ParquetStatisticsUtils::ConvertValue(type, schema_ele, parquet_stats.max).CastAs(type);
+		stats->max = ParquetStatisticsUtils::ConvertValue(type, schema_ele, parquet_stats.max).DefaultCastAs(type);
 	} else if (parquet_stats.__isset.max_value) {
-		stats->max = ParquetStatisticsUtils::ConvertValue(type, schema_ele, parquet_stats.max_value).CastAs(type);
+		stats->max =
+		    ParquetStatisticsUtils::ConvertValue(type, schema_ele, parquet_stats.max_value).DefaultCastAs(type);
 	} else {
 		stats->max = Value(type);
 	}
-	return move(stats);
+	return std::move(stats);
 }
 
 Value ParquetStatisticsUtils::ConvertValue(const LogicalType &type,
@@ -151,11 +153,15 @@ Value ParquetStatisticsUtils::ConvertValue(const LogicalType &type,
 		}
 		return Value::DATE(date_t(Load<int32_t>((data_ptr_t)stats.c_str())));
 	case LogicalTypeId::TIME:
+	case LogicalTypeId::TIME_TZ: {
 		if (stats.size() != sizeof(int64_t)) {
 			throw InternalException("Incorrect stats size for type TIME");
 		}
-		return Value::TIME(dtime_t(Load<int64_t>((data_ptr_t)stats.c_str())));
-	case LogicalTypeId::TIMESTAMP: {
+		auto time = dtime_t(Load<int64_t>((data_ptr_t)stats.c_str()));
+		return Value::TIME(time);
+	}
+	case LogicalTypeId::TIMESTAMP:
+	case LogicalTypeId::TIMESTAMP_TZ: {
 		if (schema_ele.type == Type::INT96) {
 			if (stats.size() != sizeof(Int96)) {
 				throw InternalException("Incorrect stats size for type TIMESTAMP");
@@ -167,6 +173,18 @@ Value ParquetStatisticsUtils::ConvertValue(const LogicalType &type,
 				throw InternalException("Incorrect stats size for type TIMESTAMP");
 			}
 			auto val = Load<int64_t>((data_ptr_t)stats.c_str());
+			if (schema_ele.__isset.logicalType && schema_ele.logicalType.__isset.TIMESTAMP) {
+				// logical type
+				if (schema_ele.logicalType.TIMESTAMP.unit.__isset.MILLIS) {
+					return Value::TIMESTAMPMS(timestamp_t(val));
+				} else if (schema_ele.logicalType.TIMESTAMP.unit.__isset.NANOS) {
+					return Value::TIMESTAMPNS(timestamp_t(val));
+				} else if (schema_ele.logicalType.TIMESTAMP.unit.__isset.MICROS) {
+					return Value::TIMESTAMP(timestamp_t(val));
+				} else {
+					throw InternalException("Timestamp logicalType is set but unit is not defined");
+				}
+			}
 			if (schema_ele.converted_type == duckdb_parquet::format::ConvertedType::TIMESTAMP_MILLIS) {
 				return Value::TIMESTAMPMS(timestamp_t(val));
 			} else {
@@ -227,7 +245,7 @@ unique_ptr<BaseStatistics> ParquetStatisticsUtils::TransformColumnStatistics(con
 		}
 		string_stats->has_unicode = true; // we dont know better
 		string_stats->max_string_length = NumericLimits<uint32_t>::Maximum();
-		row_group_stats = move(string_stats);
+		row_group_stats = std::move(string_stats);
 		break;
 	}
 	default:

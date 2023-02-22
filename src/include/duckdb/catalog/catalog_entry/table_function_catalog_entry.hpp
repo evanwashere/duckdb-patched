@@ -11,6 +11,7 @@
 #include "duckdb/catalog/standard_entry.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/common/vector.hpp"
+#include "duckdb/function/function_set.hpp"
 
 namespace duckdb {
 
@@ -22,9 +23,13 @@ struct CreateTableFunctionInfo;
 //! A table function in the catalog
 class TableFunctionCatalogEntry : public StandardEntry {
 public:
+	static constexpr const CatalogType Type = CatalogType::TABLE_FUNCTION_ENTRY;
+	static constexpr const char *Name = "table function";
+
+public:
 	TableFunctionCatalogEntry(Catalog *catalog, SchemaCatalogEntry *schema, CreateTableFunctionInfo *info);
 
 	//! The table function
-	vector<TableFunction> functions;
+	TableFunctionSet functions;
 };
 } // namespace duckdb

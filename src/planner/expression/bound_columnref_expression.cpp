@@ -2,17 +2,18 @@
 
 #include "duckdb/common/types/hash.hpp"
 #include "duckdb/common/to_string.hpp"
+#include "duckdb/common/field_writer.hpp"
 
 namespace duckdb {
 
 BoundColumnRefExpression::BoundColumnRefExpression(string alias_p, LogicalType type, ColumnBinding binding, idx_t depth)
-    : Expression(ExpressionType::BOUND_COLUMN_REF, ExpressionClass::BOUND_COLUMN_REF, move(type)), binding(binding),
-      depth(depth) {
-	this->alias = move(alias_p);
+    : Expression(ExpressionType::BOUND_COLUMN_REF, ExpressionClass::BOUND_COLUMN_REF, std::move(type)),
+      binding(binding), depth(depth) {
+	this->alias = std::move(alias_p);
 }
 
 BoundColumnRefExpression::BoundColumnRefExpression(LogicalType type, ColumnBinding binding, idx_t depth)
-    : BoundColumnRefExpression(string(), move(type), binding, depth) {
+    : BoundColumnRefExpression(string(), std::move(type), binding, depth) {
 }
 
 unique_ptr<Expression> BoundColumnRefExpression::Copy() {
@@ -39,6 +40,25 @@ string BoundColumnRefExpression::ToString() const {
 		return alias;
 	}
 	return "#[" + to_string(binding.table_index) + "." + to_string(binding.column_index) + "]";
+}
+
+void BoundColumnRefExpression::Serialize(FieldWriter &writer) const {
+	writer.WriteString(alias);
+	writer.WriteSerializable(return_type);
+	writer.WriteField(binding.table_index);
+	writer.WriteField(binding.column_index);
+	writer.WriteField(depth);
+}
+
+unique_ptr<Expression> BoundColumnRefExpression::Deserialize(ExpressionDeserializationState &state,
+                                                             FieldReader &reader) {
+	auto alias = reader.ReadRequired<string>();
+	auto return_type = reader.ReadRequiredSerializable<LogicalType, LogicalType>();
+	auto table_index = reader.ReadRequired<idx_t>();
+	auto column_index = reader.ReadRequired<idx_t>();
+	auto depth = reader.ReadRequired<idx_t>();
+
+	return make_unique<BoundColumnRefExpression>(alias, return_type, ColumnBinding(table_index, column_index), depth);
 }
 
 } // namespace duckdb

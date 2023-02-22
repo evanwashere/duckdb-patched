@@ -13,6 +13,7 @@ else
 fi
 
 FILES="${EXT_BASE_PATH}/extension/*/*.duckdb_extension"
+
 EXTENSION_LIST=""
 for f in $FILES
 do
@@ -21,27 +22,36 @@ do
 done
 mkdir -p testext
 cd testext
-cmake -DCMAKE_BUILD_TYPE=${CMAKE_CONFIG} ${FORCE_32_BIT_FLAG} -DTEST_REMOTE_INSTALL="${EXTENSION_LIST}" ..
+
+if [ "$2" = "oote" ]; then
+  CMAKE_ROOT="../duckdb"
+else
+  CMAKE_ROOT=".."
+fi
+
+cmake -DCMAKE_BUILD_TYPE=${CMAKE_CONFIG} ${FORCE_32_BIT_FLAG} -DTEST_REMOTE_INSTALL="${EXTENSION_LIST}" ${CMAKE_ROOT}
 cmake --build . --config ${CMAKE_CONFIG}
 cd ..
 
 duckdb_path="testext/duckdb"
 unittest_path="testext/test/unittest"
 if [ ! -f "${duckdb_path}" ]; then
-	duckdb_path="testext/${CMAKE_CONFIG}/duckdb.exe"
-	unittest_path="testext/test/${CMAKE_CONFIG}/unittest.exe"
+  duckdb_path="testext/${CMAKE_CONFIG}/duckdb.exe"
+  unittest_path="testext/test/${CMAKE_CONFIG}/unittest.exe"
 fi
 
 for f in $FILES
 do
 	ext=`basename $f .duckdb_extension`
 	install_path=${ext}
+	unsigned_flag=
 	if [ "$1" = "local" ]
 	then
 		install_path=${f}
+		unsigned_flag=-unsigned
 	fi
 	echo ${install_path}
-	${duckdb_path} -c "INSTALL '${install_path}'"
-	${duckdb_path} -c "LOAD '${ext}'"
+	${duckdb_path} ${unsigned_flag} -c "INSTALL '${install_path}'"
+	${duckdb_path} ${unsigned_flag} -c "LOAD '${ext}'"
 done
 ${unittest_path}

@@ -1,22 +1,22 @@
-#include "duckdb/planner/expression/bound_function_expression.hpp"
+#include "duckdb/common/pair.hpp"
 #include "duckdb/common/string_util.hpp"
-#include "duckdb/common/vector_operations/binary_executor.hpp"
-#include "duckdb/parser/expression/bound_expression.hpp"
-#include "duckdb/function/scalar/nested_functions.hpp"
-#include "duckdb/function/scalar/string_functions.hpp"
 #include "duckdb/common/types/chunk_collection.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
-#include "duckdb/common/pair.hpp"
+#include "duckdb/common/vector_operations/binary_executor.hpp"
+#include "duckdb/function/scalar/nested_functions.hpp"
+#include "duckdb/function/scalar/string_functions.hpp"
+#include "duckdb/parser/expression/bound_expression.hpp"
+#include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/storage/statistics/list_statistics.hpp"
 #include "duckdb/storage/statistics/validity_statistics.hpp"
 
 namespace duckdb {
 
 template <class T, bool HEAP_REF = false, bool VALIDITY_ONLY = false>
-void ListExtractTemplate(idx_t count, VectorData &list_data, VectorData &offsets_data, Vector &child_vector,
-                         idx_t list_size, Vector &result) {
-	VectorData child_data;
-	child_vector.Orrify(list_size, child_data);
+void ListExtractTemplate(idx_t count, UnifiedVectorFormat &list_data, UnifiedVectorFormat &offsets_data,
+                         Vector &child_vector, idx_t list_size, Vector &result) {
+	UnifiedVectorFormat child_format;
+	child_vector.ToUnifiedFormat(list_size, child_format);
 
 	T *result_data;
 
@@ -33,40 +33,46 @@ void ListExtractTemplate(idx_t count, VectorData &list_data, VectorData &offsets
 
 	// this is lifted from ExecuteGenericLoop because we can't push the list child data into this otherwise
 	// should have gone with GetValue perhaps
+	auto child_data = (T *)child_format.data;
 	for (idx_t i = 0; i < count; i++) {
 		auto list_index = list_data.sel->get_index(i);
 		auto offsets_index = offsets_data.sel->get_index(i);
-		if (list_data.validity.RowIsValid(list_index) && offsets_data.validity.RowIsValid(offsets_index)) {
-			auto list_entry = ((list_entry_t *)list_data.data)[list_index];
-			auto offsets_entry = ((int64_t *)offsets_data.data)[offsets_index];
+		if (!list_data.validity.RowIsValid(list_index)) {
+			result_mask.SetInvalid(i);
+			continue;
+		}
+		if (!offsets_data.validity.RowIsValid(offsets_index)) {
+			result_mask.SetInvalid(i);
+			continue;
+		}
+		auto list_entry = ((list_entry_t *)list_data.data)[list_index];
+		auto offsets_entry = ((int64_t *)offsets_data.data)[offsets_index];
 
-			// 1-based indexing
-			if (offsets_entry == 0) {
+		// 1-based indexing
+		if (offsets_entry == 0) {
+			result_mask.SetInvalid(i);
+			continue;
+		}
+		offsets_entry = (offsets_entry > 0) ? offsets_entry - 1 : offsets_entry;
+
+		idx_t child_offset;
+		if (offsets_entry < 0) {
+			if ((idx_t)-offsets_entry > list_entry.length) {
 				result_mask.SetInvalid(i);
 				continue;
 			}
-			offsets_entry = (offsets_entry > 0) ? offsets_entry - 1 : offsets_entry;
-
-			idx_t child_offset;
-			if (offsets_entry < 0) {
-				if ((idx_t)-offsets_entry > list_entry.length) {
-					result_mask.SetInvalid(i);
-					continue;
-				}
-				child_offset = list_entry.offset + list_entry.length + offsets_entry;
-			} else {
-				if ((idx_t)offsets_entry >= list_entry.length) {
-					result_mask.SetInvalid(i);
-					continue;
-				}
-				child_offset = list_entry.offset + offsets_entry;
-			}
-			if (child_data.validity.RowIsValid(child_offset)) {
-				if (!VALIDITY_ONLY) {
-					result_data[i] = ((T *)child_data.data)[child_offset];
-				}
-			} else {
+			child_offset = list_entry.offset + list_entry.length + offsets_entry;
+		} else {
+			if ((idx_t)offsets_entry >= list_entry.length) {
 				result_mask.SetInvalid(i);
+				continue;
+			}
+			child_offset = list_entry.offset + offsets_entry;
+		}
+		auto child_index = child_format.sel->get_index(child_offset);
+		if (child_format.validity.RowIsValid(child_index)) {
+			if (!VALIDITY_ONLY) {
+				result_data[i] = child_data[child_index];
 			}
 		} else {
 			result_mask.SetInvalid(i);
@@ -76,8 +82,8 @@ void ListExtractTemplate(idx_t count, VectorData &list_data, VectorData &offsets
 		result.SetVectorType(VectorType::CONSTANT_VECTOR);
 	}
 }
-static void ExecuteListExtractInternal(const idx_t count, VectorData &list, VectorData &offsets, Vector &child_vector,
-                                       idx_t list_size, Vector &result) {
+static void ExecuteListExtractInternal(const idx_t count, UnifiedVectorFormat &list, UnifiedVectorFormat &offsets,
+                                       Vector &child_vector, idx_t list_size, Vector &result) {
 	D_ASSERT(child_vector.GetType() == result.GetType());
 	switch (result.GetType().InternalType()) {
 	case PhysicalType::BOOL:
@@ -148,11 +154,11 @@ static void ExecuteListExtractInternal(const idx_t count, VectorData &list, Vect
 
 static void ExecuteListExtract(Vector &result, Vector &list, Vector &offsets, const idx_t count) {
 	D_ASSERT(list.GetType().id() == LogicalTypeId::LIST);
-	VectorData list_data;
-	VectorData offsets_data;
+	UnifiedVectorFormat list_data;
+	UnifiedVectorFormat offsets_data;
 
-	list.Orrify(count, list_data);
-	offsets.Orrify(count, offsets_data);
+	list.ToUnifiedFormat(count, list_data);
+	offsets.ToUnifiedFormat(count, offsets_data);
 	ExecuteListExtractInternal(count, list_data, offsets_data, ListVector::GetEntry(list),
 	                           ListVector::GetListSize(list), result);
 	result.Verify(count);
@@ -161,7 +167,7 @@ static void ExecuteListExtract(Vector &result, Vector &list, Vector &offsets, co
 static void ExecuteStringExtract(Vector &result, Vector &input_vector, Vector &subscript_vector, const idx_t count) {
 	BinaryExecutor::Execute<string_t, int64_t, string_t>(
 	    input_vector, subscript_vector, result, count, [&](string_t input_string, int64_t subscript) {
-		    return SubstringFun::SubstringScalarFunction(result, input_string, subscript, 1);
+		    return SubstringFun::SubstringUnicode(result, input_string, subscript, 1);
 	    });
 }
 
@@ -198,14 +204,9 @@ static void ListExtractFunction(DataChunk &args, ExpressionState &state, Vector 
 static unique_ptr<FunctionData> ListExtractBind(ClientContext &context, ScalarFunction &bound_function,
                                                 vector<unique_ptr<Expression>> &arguments) {
 	D_ASSERT(bound_function.arguments.size() == 2);
-	if (arguments[0]->return_type.id() == LogicalTypeId::SQLNULL) {
-		bound_function.arguments[0] = LogicalType::SQLNULL;
-		bound_function.return_type = LogicalType::SQLNULL;
-	} else {
-		D_ASSERT(LogicalTypeId::LIST == arguments[0]->return_type.id());
-		// list extract returns the child type of the list as return type
-		bound_function.return_type = ListType::GetChildType(arguments[0]->return_type);
-	}
+	D_ASSERT(LogicalTypeId::LIST == arguments[0]->return_type.id());
+	// list extract returns the child type of the list as return type
+	bound_function.return_type = ListType::GetChildType(arguments[0]->return_type);
 	return make_unique<VariableReturnBindData>(bound_function.return_type);
 }
 
@@ -227,10 +228,9 @@ static unique_ptr<BaseStatistics> ListExtractStats(ClientContext &context, Funct
 void ListExtractFun::RegisterFunction(BuiltinFunctions &set) {
 	// the arguments and return types are actually set in the binder function
 	ScalarFunction lfun({LogicalType::LIST(LogicalType::ANY), LogicalType::BIGINT}, LogicalType::ANY,
-	                    ListExtractFunction, false, false, ListExtractBind, nullptr, ListExtractStats);
+	                    ListExtractFunction, ListExtractBind, nullptr, ListExtractStats);
 
-	ScalarFunction sfun({LogicalType::VARCHAR, LogicalType::BIGINT}, LogicalType::VARCHAR, ListExtractFunction, false,
-	                    false, nullptr);
+	ScalarFunction sfun({LogicalType::VARCHAR, LogicalType::BIGINT}, LogicalType::VARCHAR, ListExtractFunction);
 
 	ScalarFunctionSet list_extract("list_extract");
 	list_extract.AddFunction(lfun);

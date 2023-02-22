@@ -5,7 +5,7 @@
 namespace duckdb {
 
 BoundSubqueryExpression::BoundSubqueryExpression(LogicalType return_type)
-    : Expression(ExpressionType::SUBQUERY, ExpressionClass::BOUND_SUBQUERY, move(return_type)) {
+    : Expression(ExpressionType::SUBQUERY, ExpressionClass::BOUND_SUBQUERY, std::move(return_type)) {
 }
 
 string BoundSubqueryExpression::ToString() const {
@@ -24,6 +24,10 @@ unique_ptr<Expression> BoundSubqueryExpression::Copy() {
 bool BoundSubqueryExpression::PropagatesNullValues() const {
 	// TODO this can be optimized further by checking the actual subquery node
 	return false;
+}
+
+void BoundSubqueryExpression::Serialize(FieldWriter &writer) const {
+	throw NotImplementedException(ExpressionTypeToString(type));
 }
 
 } // namespace duckdb

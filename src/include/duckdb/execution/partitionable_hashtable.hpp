@@ -13,22 +13,26 @@
 namespace duckdb {
 
 struct RadixPartitionInfo {
-	explicit RadixPartitionInfo(idx_t _n_partitions_upper_bound);
+	explicit RadixPartitionInfo(idx_t n_partitions_upper_bound);
 	const idx_t n_partitions;
 	const idx_t radix_bits;
 	const hash_t radix_mask;
 	constexpr static idx_t RADIX_SHIFT = 40;
+
+	inline hash_t GetHashPartition(hash_t hash) const {
+		return (hash & radix_mask) >> RADIX_SHIFT;
+	}
 };
 
-typedef vector<unique_ptr<GroupedAggregateHashTable>> HashTableList;
+typedef vector<unique_ptr<GroupedAggregateHashTable>> HashTableList; // NOLINT
 
 class PartitionableHashTable {
 public:
-	PartitionableHashTable(BufferManager &buffer_manager_p, RadixPartitionInfo &partition_info_p,
+	PartitionableHashTable(ClientContext &context, Allocator &allocator, RadixPartitionInfo &partition_info_p,
 	                       vector<LogicalType> group_types_p, vector<LogicalType> payload_types_p,
 	                       vector<BoundAggregateExpression *> bindings_p);
 
-	idx_t AddChunk(DataChunk &groups, DataChunk &payload, bool do_partition);
+	idx_t AddChunk(DataChunk &groups, DataChunk &payload, bool do_partition, const vector<idx_t> &filter);
 	void Partition();
 	bool IsPartitioned();
 
@@ -38,7 +42,8 @@ public:
 	void Finalize();
 
 private:
-	BufferManager &buffer_manager;
+	ClientContext &context;
+	Allocator &allocator;
 	vector<LogicalType> group_types;
 	vector<LogicalType> payload_types;
 	vector<BoundAggregateExpression *> bindings;
@@ -54,6 +59,7 @@ private:
 	unordered_map<hash_t, HashTableList> radix_partitioned_hts;
 
 private:
-	idx_t ListAddChunk(HashTableList &list, DataChunk &groups, Vector &group_hashes, DataChunk &payload);
+	idx_t ListAddChunk(HashTableList &list, DataChunk &groups, Vector &group_hashes, DataChunk &payload,
+	                   const vector<idx_t> &filter);
 };
 } // namespace duckdb

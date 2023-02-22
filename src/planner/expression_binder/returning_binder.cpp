@@ -14,6 +14,8 @@ BindResult ReturningBinder::BindExpression(unique_ptr<ParsedExpression> *expr_pt
 		return BindResult("SUBQUERY is not supported in returning statements");
 	case ExpressionClass::BOUND_SUBQUERY:
 		return BindResult("BOUND SUBQUERY is not supported in returning statements");
+	case ExpressionClass::COLUMN_REF:
+		return ExpressionBinder::BindExpression(expr_ptr, depth);
 	default:
 		return ExpressionBinder::BindExpression(expr_ptr, depth);
 	}

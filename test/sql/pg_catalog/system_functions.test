@@ -2,6 +2,9 @@
 # description: Test various postgres' system functions (https://www.postgresql.org/docs/9.1/functions-info.html)
 # group: [pg_catalog]
 
+# avoid loading a storage database because it changes the initial database name
+require noforcestorage
+
 query I
 SELECT CURRENT_USER
 ----
@@ -10,12 +13,12 @@ duckdb
 query I
 SELECT CURRENT_CATALOG
 ----
-duckdb
+memory
 
 query I
 SELECT CURRENT_DATABASE()
 ----
-duckdb
+memory
 
 query I
 SELECT USER
@@ -46,9 +49,14 @@ SELECT current_schema();
 main
 
 query I
+SELECT current_schemas(true);
+----
+[main, main, main, pg_catalog]
+
+query I
 SELECT current_schemas(false);
 ----
-[temp, main, pg_catalog]
+[]
 
 query IIII
 SELECT inet_client_addr(), inet_client_port(), inet_server_addr(), inet_server_port();

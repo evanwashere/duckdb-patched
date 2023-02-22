@@ -14,26 +14,14 @@
 namespace duckdb {
 
 struct CreateTableFunctionInfo : public CreateFunctionInfo {
-	explicit CreateTableFunctionInfo(TableFunctionSet set)
-	    : CreateFunctionInfo(CatalogType::TABLE_FUNCTION_ENTRY), functions(move(set.functions)) {
-		this->name = set.name;
-	}
-	explicit CreateTableFunctionInfo(TableFunction function) : CreateFunctionInfo(CatalogType::TABLE_FUNCTION_ENTRY) {
-		this->name = function.name;
-		functions.push_back(move(function));
-	}
+	DUCKDB_API explicit CreateTableFunctionInfo(TableFunction function);
+	DUCKDB_API explicit CreateTableFunctionInfo(TableFunctionSet set);
 
 	//! The table functions
-	vector<TableFunction> functions;
+	TableFunctionSet functions;
 
 public:
-	unique_ptr<CreateInfo> Copy() const override {
-		TableFunctionSet set(name);
-		set.functions = functions;
-		auto result = make_unique<CreateTableFunctionInfo>(move(set));
-		CopyProperties(*result);
-		return move(result);
-	}
+	DUCKDB_API unique_ptr<CreateInfo> Copy() const;
 };
 
 } // namespace duckdb

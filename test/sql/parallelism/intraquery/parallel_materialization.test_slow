@@ -30,22 +30,22 @@ INSERT INTO integers SELECT * FROM range(2500000, 5000000) tbl(i);
 loop i 0 2
 
 # IN-clause (semi join)
-query I
+query I sort
 SELECT * FROM integers WHERE i IN (SELECT * FROM other_table)
 ----
-337
-948247
 1779793
+337
 4779793
+948247
 
 # explicit join
-query I
+query I sort
 SELECT * FROM integers JOIN other_table USING(i)
 ----
-337
-948247
 1779793
+337
 4779793
+948247
 
 # simple WHERE clause
 query I
@@ -55,13 +55,13 @@ SELECT * FROM integers WHERE i > 337 AND i < 340
 339
 
 # IN-clause
-query I
+query I sort
 SELECT * FROM integers WHERE i IN (337, 948247, 1779793, 4779793, 99999999999999)
 ----
-337
-948247
 1779793
+337
 4779793
+948247
 
 # more complex where clause
 query I

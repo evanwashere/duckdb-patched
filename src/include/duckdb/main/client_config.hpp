@@ -13,6 +13,7 @@
 #include "duckdb/common/enums/output_type.hpp"
 #include "duckdb/common/enums/profiler_format.hpp"
 #include "duckdb/common/types/value.hpp"
+#include "duckdb/common/progress_bar/progress_bar.hpp"
 
 namespace duckdb {
 class ClientContext;
@@ -23,15 +24,21 @@ typedef std::function<unique_ptr<PhysicalResultCollector>(ClientContext &context
     get_result_collector_t;
 
 struct ClientConfig {
+	//! The home directory used by the system (if any)
+	string home_directory;
 	//! If the query profiler is enabled or not.
 	bool enable_profiler = false;
 	//! If detailed query profiling is enabled
 	bool enable_detailed_profiling = false;
-	//! The format to automatically print query profiling information in (default: disabled)
-	ProfilerPrintFormat profiler_print_format = ProfilerPrintFormat::NONE;
+	//! The format to print query profiling information in (default: query_tree), if enabled.
+	ProfilerPrintFormat profiler_print_format = ProfilerPrintFormat::QUERY_TREE;
 	//! The file to save query profiling information to, instead of printing it to the console
 	//! (empty = print to console)
 	string profiler_save_location;
+
+	//! Allows suppressing profiler output, even if enabled. We turn on the profiler on all test runs but don't want
+	//! to output anything
+	bool emit_profiler_output = true;
 
 	//! If the progress bar is enabled or not.
 	bool enable_progress_bar = false;
@@ -46,8 +53,12 @@ struct ClientConfig {
 	//! The maximum expression depth limit in the parser
 	idx_t max_expression_depth = 1000;
 
-	// Whether or not aggressive query verification is enabled
+	//! Whether or not aggressive query verification is enabled
 	bool query_verification_enabled = false;
+	//! Whether or not verification of external operators is enabled, used for testing
+	bool verify_external = false;
+	//! Whether or not we should verify the serializer
+	bool verify_serializer = false;
 	//! Enable the running of optimizers
 	bool enable_optimizer = true;
 	//! Force parallelism of small tables, used for testing
@@ -58,9 +69,18 @@ struct ClientConfig {
 	bool force_external = false;
 	//! Force disable cross product generation when hyper graph isn't connected, used for testing
 	bool force_no_cross_product = false;
+	//! If this context should also try to use the available replacement scans
+	//! True by default
+	bool use_replacement_scans = true;
 	//! Maximum bits allowed for using a perfect hash table (i.e. the perfect HT can hold up to 2^perfect_ht_threshold
 	//! elements)
 	idx_t perfect_ht_threshold = 12;
+
+	//! Callback to create a progress bar display
+	progress_bar_display_create_func_t display_create_func = nullptr;
+
+	//! Override for the default extension repository
+	string custom_extension_repo = "";
 
 	//! The explain output type used when none is specified (default: PHYSICAL_ONLY)
 	ExplainOutputType explain_output_type = ExplainOutputType::PHYSICAL_ONLY;
@@ -74,8 +94,15 @@ struct ClientConfig {
 
 public:
 	static ClientConfig &GetConfig(ClientContext &context);
+	static const ClientConfig &GetConfig(const ClientContext &context);
 
 	static string ExtractTimezoneFromConfig(ClientConfig &config);
+
+	string ExtractTimezone() const;
+
+	bool AnyVerification() {
+		return query_verification_enabled || verify_external || verify_serializer;
+	}
 };
 
 } // namespace duckdb

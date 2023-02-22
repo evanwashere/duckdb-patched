@@ -30,6 +30,11 @@ function get_parameter(bind_info::BindInfo, index::Int64)
     return Value(duckdb_bind_get_parameter(bind_info.handle, index))
 end
 
+function set_stats_cardinality(bind_info::BindInfo, cardinality::UInt64, is_exact::Bool)
+    duckdb_bind_set_cardinality(bind_info.handle, cardinality, is_exact)
+    return
+end
+
 function add_result_column(bind_info::BindInfo, name::AbstractString, type::DataType)
     return add_result_column(bind_info, name, create_logical_type(type))
 end
@@ -43,16 +48,26 @@ function get_extra_data(bind_info::BindInfo)
 end
 
 function _add_global_object(main_function, object)
-    lock(main_function.global_lock)
-    push!(main_function.global_objects, object)
-    unlock(main_function.global_lock)
+    begin
+        lock(main_function.global_lock)
+        try
+            push!(main_function.global_objects, object)
+        finally
+            unlock(main_function.global_lock)
+        end
+    end
     return
 end
 
 function _remove_global_object(main_function, object)
-    lock(main_function.global_lock)
-    delete!(main_function.global_objects, object)
-    unlock(main_function.global_lock)
+    begin
+        lock(main_function.global_lock)
+        try
+            delete!(main_function.global_objects, object)
+        finally
+            unlock(main_function.global_lock)
+        end
+    end
     return
 end
 

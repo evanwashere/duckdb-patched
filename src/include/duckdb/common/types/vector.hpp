@@ -19,7 +19,7 @@
 
 namespace duckdb {
 
-struct VectorData {
+struct UnifiedVectorFormat {
 	const SelectionVector *sel;
 	data_ptr_t data;
 	ValidityMask validity;
@@ -29,9 +29,16 @@ struct VectorData {
 class VectorCache;
 class VectorStructBuffer;
 class VectorListBuffer;
-class ChunkCollection;
 
 struct SelCache;
+
+struct ConsecutiveChildListInfo {
+	ConsecutiveChildListInfo() : is_constant(true), needs_slicing(false), child_list_info(list_entry_t(0, 0)) {
+	}
+	bool is_constant;
+	bool needs_slicing;
+	list_entry_t child_list_info;
+};
 
 //!  Vector of values of a specified PhysicalType.
 class Vector {
@@ -40,7 +47,9 @@ class Vector {
 	friend struct FlatVector;
 	friend struct ListVector;
 	friend struct StringVector;
+	friend struct FSSTVector;
 	friend struct StructVector;
+	friend struct UnionVector;
 	friend struct SequenceVector;
 
 	friend class DataChunk;
@@ -48,11 +57,11 @@ class Vector {
 
 public:
 	//! Create a vector that references the other vector
-	DUCKDB_API explicit Vector(Vector &other);
+	DUCKDB_API Vector(Vector &other);
 	//! Create a vector that slices another vector
 	DUCKDB_API explicit Vector(Vector &other, const SelectionVector &sel, idx_t count);
-	//! Create a vector that slices another vector starting from a specific offset
-	DUCKDB_API explicit Vector(Vector &other, idx_t offset);
+	//! Create a vector that slices another vector between a pair of offsets
+	DUCKDB_API explicit Vector(Vector &other, idx_t offset, idx_t end);
 	//! Create a vector of size one holding the passed on value
 	DUCKDB_API explicit Vector(const Value &value);
 	//! Create a vector of size tuple_count (non-standard)
@@ -93,7 +102,7 @@ public:
 	DUCKDB_API void ResetFromCache(const VectorCache &cache);
 
 	//! Creates a reference to a slice of the other vector
-	DUCKDB_API void Slice(Vector &other, idx_t offset);
+	DUCKDB_API void Slice(Vector &other, idx_t offset, idx_t end);
 	//! Creates a reference to a slice of the other vector
 	DUCKDB_API void Slice(Vector &other, const SelectionVector &sel, idx_t count);
 	//! Turns the vector into a dictionary vector with the specified dictionary
@@ -107,25 +116,31 @@ public:
 
 	//! Converts this Vector to a printable string representation
 	DUCKDB_API string ToString(idx_t count) const;
-	DUCKDB_API void Print(idx_t count);
+	DUCKDB_API void Print(idx_t count) const;
 
 	DUCKDB_API string ToString() const;
-	DUCKDB_API void Print();
+	DUCKDB_API void Print() const;
 
 	//! Flatten the vector, removing any compression and turning it into a FLAT_VECTOR
-	DUCKDB_API void Normalify(idx_t count);
-	DUCKDB_API void Normalify(const SelectionVector &sel, idx_t count);
-	//! Obtains a selection vector and data pointer through which the data of this vector can be accessed
-	DUCKDB_API void Orrify(idx_t count, VectorData &data);
+	DUCKDB_API void Flatten(idx_t count);
+	DUCKDB_API void Flatten(const SelectionVector &sel, idx_t count);
+	//! Creates a UnifiedVectorFormat of a vector
+	//! The UnifiedVectorFormat allows efficient reading of vectors regardless of their vector type
+	//! It contains (1) a data pointer, (2) a validity mask, and (3) a selection vector
+	//! Access to the individual vector elements can be performed through data_pointer[sel_idx[i]]/validity[sel_idx[i]]
+	//! The most common vector types (flat, constant & dictionary) can be converted to the canonical format "for free"
+	//! ToUnifiedFormat was originally called Orrify, as a tribute to Orri Erling who came up with it
+	DUCKDB_API void ToUnifiedFormat(idx_t count, UnifiedVectorFormat &data);
 
 	//! Turn the vector into a sequence vector
-	DUCKDB_API void Sequence(int64_t start, int64_t increment);
+	DUCKDB_API void Sequence(int64_t start, int64_t increment, idx_t count);
 
 	//! Verify that the Vector is in a consistent, not corrupt state. DEBUG
 	//! FUNCTION ONLY!
 	DUCKDB_API void Verify(idx_t count);
 	//! Asserts that the CheckMapValidity returns MapInvalidReason::VALID
 	DUCKDB_API static void VerifyMap(Vector &map, const SelectionVector &sel, idx_t count);
+	DUCKDB_API static void VerifyUnion(Vector &map, const SelectionVector &sel, idx_t count);
 	DUCKDB_API static void Verify(Vector &vector, const SelectionVector &sel, idx_t count);
 	DUCKDB_API void UTFVerify(idx_t count);
 	DUCKDB_API void UTFVerify(const SelectionVector &sel, idx_t count);
@@ -171,7 +186,9 @@ public:
 
 private:
 	//! Returns the [index] element of the Vector as a Value.
-	DUCKDB_API static Value GetValue(const Vector &v, idx_t index);
+	static Value GetValue(const Vector &v, idx_t index);
+	//! Returns the [index] element of the Vector as a Value.
+	static Value GetValueInternal(const Vector &v, idx_t index);
 
 protected:
 	//! The vector type specifies how the data of the vector is physically stored (i.e. if it is a single repeated
@@ -193,7 +210,8 @@ protected:
 //! The DictionaryBuffer holds a selection vector
 class VectorChildBuffer : public VectorBuffer {
 public:
-	VectorChildBuffer(Vector vector) : VectorBuffer(VectorBufferType::VECTOR_CHILD_BUFFER), data(move(vector)) {
+	explicit VectorChildBuffer(Vector vector)
+	    : VectorBuffer(VectorBufferType::VECTOR_CHILD_BUFFER), data(std::move(vector)) {
 	}
 
 public:
@@ -288,12 +306,13 @@ struct FlatVector {
 		D_ASSERT(vector.GetVectorType() == VectorType::FLAT_VECTOR);
 		vector.validity.Initialize(new_validity);
 	}
-	static void SetNull(Vector &vector, idx_t idx, bool is_null);
+	DUCKDB_API static void SetNull(Vector &vector, idx_t idx, bool is_null);
 	static inline bool IsNull(const Vector &vector, idx_t idx) {
 		D_ASSERT(vector.GetVectorType() == VectorType::FLAT_VECTOR);
 		return !vector.validity.RowIsValid(idx);
 	}
 	DUCKDB_API static const SelectionVector *IncrementalSelectionVector();
+	static Value GetValuesFromOffsets(Vector &values, vector<idx_t> &offsets);
 };
 
 struct ListVector {
@@ -312,13 +331,20 @@ struct ListVector {
 	DUCKDB_API static idx_t GetListSize(const Vector &vector);
 	//! Sets the total size of the underlying child-vector of a list
 	DUCKDB_API static void SetListSize(Vector &vec, idx_t size);
+	//! Gets the total capacity of the underlying child-vector of a list
+	DUCKDB_API static idx_t GetListCapacity(const Vector &vector);
+	//! Sets the total capacity of the underlying child-vector of a list
 	DUCKDB_API static void Reserve(Vector &vec, idx_t required_capacity);
 	DUCKDB_API static void Append(Vector &target, const Vector &source, idx_t source_size, idx_t source_offset = 0);
 	DUCKDB_API static void Append(Vector &target, const Vector &source, const SelectionVector &sel, idx_t source_size,
 	                              idx_t source_offset = 0);
 	DUCKDB_API static void PushBack(Vector &target, const Value &insert);
-	DUCKDB_API static vector<idx_t> Search(Vector &list, const Value &key, idx_t row);
-	DUCKDB_API static Value GetValuesFromOffsets(Vector &list, vector<idx_t> &offsets);
+	//! Returns the child_vector of list starting at offset until offset + count, and its length
+	DUCKDB_API static idx_t GetConsecutiveChildList(Vector &list, Vector &result, idx_t offset, idx_t count);
+	//! Returns information to only copy a section of a list child vector
+	DUCKDB_API static ConsecutiveChildListInfo GetConsecutiveChildListInfo(Vector &list, idx_t offset, idx_t count);
+	//! Slice and flatten a child vector to only contain a consecutive subsection of the child entries
+	DUCKDB_API static void GetConsecutiveChildSelVector(Vector &list, SelectionVector &sel, idx_t offset, idx_t count);
 	//! Share the entry of the other list vector
 	DUCKDB_API static void ReferenceEntry(Vector &vector, Vector &other);
 };
@@ -342,11 +368,61 @@ struct StringVector {
 	//! result of an operation
 	DUCKDB_API static string_t EmptyString(Vector &vector, idx_t len);
 	//! Adds a reference to a handle that stores strings of this vector
-	DUCKDB_API static void AddHandle(Vector &vector, unique_ptr<BufferHandle> handle);
+	DUCKDB_API static void AddHandle(Vector &vector, BufferHandle handle);
 	//! Adds a reference to an unspecified vector buffer that stores strings of this vector
 	DUCKDB_API static void AddBuffer(Vector &vector, buffer_ptr<VectorBuffer> buffer);
 	//! Add a reference from this vector to the string heap of the provided vector
 	DUCKDB_API static void AddHeapReference(Vector &vector, Vector &other);
+};
+
+struct FSSTVector {
+	static inline const ValidityMask &Validity(const Vector &vector) {
+		D_ASSERT(vector.GetVectorType() == VectorType::FSST_VECTOR);
+		return vector.validity;
+	}
+	static inline ValidityMask &Validity(Vector &vector) {
+		D_ASSERT(vector.GetVectorType() == VectorType::FSST_VECTOR);
+		return vector.validity;
+	}
+	static inline void SetValidity(Vector &vector, ValidityMask &new_validity) {
+		D_ASSERT(vector.GetVectorType() == VectorType::FSST_VECTOR);
+		vector.validity.Initialize(new_validity);
+	}
+	static inline const_data_ptr_t GetCompressedData(const Vector &vector) {
+		D_ASSERT(vector.GetVectorType() == VectorType::FSST_VECTOR);
+		return vector.data;
+	}
+	static inline data_ptr_t GetCompressedData(Vector &vector) {
+		D_ASSERT(vector.GetVectorType() == VectorType::FSST_VECTOR);
+		return vector.data;
+	}
+	template <class T>
+	static inline const T *GetCompressedData(const Vector &vector) {
+		return (const T *)FSSTVector::GetCompressedData(vector);
+	}
+	template <class T>
+	static inline T *GetCompressedData(Vector &vector) {
+		return (T *)FSSTVector::GetCompressedData(vector);
+	}
+	//! Decompresses an FSST_VECTOR into a FLAT_VECTOR. Note: validity is not copied.
+	static void DecompressVector(const Vector &src, Vector &dst, idx_t src_offset, idx_t dst_offset, idx_t copy_count,
+	                             const SelectionVector *sel);
+
+	DUCKDB_API static string_t AddCompressedString(Vector &vector, string_t data);
+	DUCKDB_API static string_t AddCompressedString(Vector &vector, const char *data, idx_t len);
+	DUCKDB_API static void RegisterDecoder(Vector &vector, buffer_ptr<void> &duckdb_fsst_decoder);
+	DUCKDB_API static void *GetDecoder(const Vector &vector);
+	//! Setting the string count is required to be able to correctly flatten the vector
+	DUCKDB_API static void SetCount(Vector &vector, idx_t count);
+	DUCKDB_API static idx_t GetCount(Vector &vector);
+};
+
+struct MapVector {
+	DUCKDB_API static const Vector &GetKeys(const Vector &vector);
+	DUCKDB_API static const Vector &GetValues(const Vector &vector);
+	DUCKDB_API static Vector &GetKeys(Vector &vector);
+	DUCKDB_API static Vector &GetValues(Vector &vector);
+	static vector<idx_t> Search(Vector &keys, idx_t count, const Value &key, list_entry_t &entry);
 };
 
 struct StructVector {
@@ -354,12 +430,52 @@ struct StructVector {
 	DUCKDB_API static vector<unique_ptr<Vector>> &GetEntries(Vector &vector);
 };
 
+struct UnionVector {
+	// Unions are stored as structs, but the first child is always the "tag"
+	// vector, specifying the currently selected member for that row.
+	// The remaining children are the members of the union.
+	// INVARIANTS:
+	//	1.	Only one member vector (the one "selected" by the tag) can be
+	//		non-NULL in each row.
+	//
+	//	2.	The validity of the tag vector always matches the validity of the
+	//		union vector itself.
+	//
+	//	3.	For each tag in the tag vector, 0 <= tag < |members|
+
+	//! Get the tag vector of a union vector
+	DUCKDB_API static const Vector &GetTags(const Vector &v);
+	DUCKDB_API static Vector &GetTags(Vector &v);
+
+	//! Get the tag at the specific index of the union vector
+	DUCKDB_API static union_tag_t GetTag(const Vector &vector, idx_t index);
+
+	//! Get the member vector of a union vector by index
+	DUCKDB_API static const Vector &GetMember(const Vector &vector, idx_t member_index);
+	DUCKDB_API static Vector &GetMember(Vector &vector, idx_t member_index);
+
+	//! Set every entry in the UnionVector to a specific member.
+	//! This is useful to set the entire vector to a single member, e.g. when "creating"
+	//! a union to return in a function, when you only have one alternative to return.
+	//! if 'keep_tags_for_null' is false, the tags will be set to NULL where the member is NULL.
+	//! (the validity of the tag vector will match the selected member vector)
+	//! otherwise, they are all set to the 'tag'.
+	//! This will also handle invalidation of the non-selected members
+	DUCKDB_API static void SetToMember(Vector &vector, union_tag_t tag, Vector &member_vector, idx_t count,
+	                                   bool keep_tags_for_null);
+};
+
 struct SequenceVector {
-	static void GetSequence(const Vector &vector, int64_t &start, int64_t &increment) {
+	static void GetSequence(const Vector &vector, int64_t &start, int64_t &increment, int64_t &sequence_count) {
 		D_ASSERT(vector.GetVectorType() == VectorType::SEQUENCE_VECTOR);
 		auto data = (int64_t *)vector.buffer->GetData();
 		start = data[0];
 		increment = data[1];
+		sequence_count = data[2];
+	}
+	static void GetSequence(const Vector &vector, int64_t &start, int64_t &increment) {
+		int64_t sequence_count;
+		GetSequence(vector, start, increment, sequence_count);
 	}
 };
 

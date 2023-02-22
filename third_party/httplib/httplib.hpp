@@ -104,8 +104,10 @@
 #define CPPHTTPLIB_RECV_FLAGS 0
 #endif
 
-#ifndef CPPHTTPLIB_SEND_FLAGS
+#ifndef MSG_NOSIGNAL
 #define CPPHTTPLIB_SEND_FLAGS 0
+#else
+#define CPPHTTPLIB_SEND_FLAGS MSG_NOSIGNAL
 #endif
 
 #ifndef CPPHTTPLIB_LISTEN_BACKLOG
@@ -2050,7 +2052,7 @@ inline std::string encode_url(const std::string &s) {
 	for (size_t i = 0; s[i]; i++) {
 		switch (s[i]) {
 		case ' ': result += "%20"; break;
-		case '+': result += "%2B"; break;
+//		case '+': result += "%2B"; break;
 		case '\r': result += "%0D"; break;
 		case '\n': result += "%0A"; break;
 		case '\'': result += "%27"; break;
@@ -2096,7 +2098,12 @@ inline std::string decode_url(const std::string &s,
 				int val = 0;
 				if (from_hex_to_i(s, i + 1, 2, val)) {
 					// 2 digits hex codes
-					result += static_cast<char>(val);
+					if (static_cast<char>(val) == '+'){
+						// We don't decode +
+						result += "%2B";
+					} else {
+						result += static_cast<char>(val);
+					}
 					i += 2; // '00'
 				} else {
 					result += s[i];
@@ -3232,7 +3239,7 @@ inline bool parse_header(const char *beg, const char *end, T fn) {
 	}
 
 	if (p < end) {
-		fn(std::string(beg, key_end), decode_url(std::string(p, end), false));
+		fn(std::string(beg, key_end), std::string(p, end));
 		return true;
 	}
 
@@ -3695,7 +3702,7 @@ inline void parse_query_text(const std::string &s, Params &params) {
 		});
 
 		if (!key.empty()) {
-			params.emplace(decode_url(key, true), decode_url(val, true));
+			params.emplace(decode_url(key, true), decode_url(val, false));
 		}
 	});
 }
@@ -6072,7 +6079,7 @@ inline bool ClientImpl::redirect(Request &req, Response &res, Error &error) {
 		return false;
 	}
 
-	auto location = detail::decode_url(res.get_header_value("location"), false);
+	auto location = res.get_header_value("location");
 	if (location.empty()) { return false; }
 
 	const static Regex re(

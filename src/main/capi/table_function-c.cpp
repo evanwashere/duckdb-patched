@@ -1,8 +1,9 @@
-#include "duckdb/main/capi_internal.hpp"
+#include "duckdb/main/capi/capi_internal.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/parser/parsed_data/create_table_function_info.hpp"
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/storage/statistics/node_statistics.hpp"
 
 namespace duckdb {
 
@@ -35,6 +36,7 @@ struct CTableBindData : public TableFunctionData {
 	CTableFunctionInfo *info = nullptr;
 	void *bind_data = nullptr;
 	duckdb_delete_callback_t delete_callback = nullptr;
+	unique_ptr<NodeStatistics> stats;
 };
 
 struct CTableInternalBindInfo {
@@ -118,7 +120,7 @@ unique_ptr<FunctionData> CTableFunctionBind(ClientContext &context, TableFunctio
 	}
 
 	result->info = info;
-	return move(result);
+	return std::move(result);
 }
 
 unique_ptr<GlobalTableFunctionState> CTableFunctionInit(ClientContext &context, TableFunctionInitInput &data_p) {
@@ -130,15 +132,15 @@ unique_ptr<GlobalTableFunctionState> CTableFunctionInit(ClientContext &context, 
 	if (!init_info.success) {
 		throw Exception(init_info.error);
 	}
-	return move(result);
+	return std::move(result);
 }
 
-unique_ptr<LocalTableFunctionState> CTableFunctionLocalInit(ClientContext &context, TableFunctionInitInput &data_p,
+unique_ptr<LocalTableFunctionState> CTableFunctionLocalInit(ExecutionContext &context, TableFunctionInitInput &data_p,
                                                             GlobalTableFunctionState *gstate) {
 	auto &bind_data = (CTableBindData &)*data_p.bind_data;
 	auto result = make_unique<CTableLocalInitData>();
 	if (!bind_data.info->local_init) {
-		return move(result);
+		return std::move(result);
 	}
 
 	CTableInternalInitInfo init_info(bind_data, result->init_data, data_p.column_ids, data_p.filters);
@@ -146,7 +148,15 @@ unique_ptr<LocalTableFunctionState> CTableFunctionLocalInit(ClientContext &conte
 	if (!init_info.success) {
 		throw Exception(init_info.error);
 	}
-	return move(result);
+	return std::move(result);
+}
+
+unique_ptr<NodeStatistics> CTableFunctionCardinality(ClientContext &context, const FunctionData *bind_data_p) {
+	auto &bind_data = (const CTableBindData &)*bind_data_p;
+	if (!bind_data.stats) {
+		return nullptr;
+	}
+	return make_unique<NodeStatistics>(*bind_data.stats);
 }
 
 void CTableFunction(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
@@ -154,7 +164,7 @@ void CTableFunction(ClientContext &context, TableFunctionInput &data_p, DataChun
 	auto &global_data = (CTableGlobalInitData &)*data_p.global_state;
 	auto &local_data = (CTableLocalInitData &)*data_p.local_state;
 	CTableInternalFunctionInfo function_info(bind_data, global_data.init_data, local_data.init_data);
-	bind_data.info->function(&function_info, &output);
+	bind_data.info->function(&function_info, reinterpret_cast<duckdb_data_chunk>(&output));
 	if (!function_info.success) {
 		throw Exception(function_info.error);
 	}
@@ -169,6 +179,7 @@ duckdb_table_function duckdb_create_table_function() {
 	auto function = new duckdb::TableFunction("", {}, duckdb::CTableFunction, duckdb::CTableFunctionBind,
 	                                          duckdb::CTableFunctionInit, duckdb::CTableFunctionLocalInit);
 	function->function_info = duckdb::make_shared<duckdb::CTableFunctionInfo>();
+	function->cardinality = duckdb::CTableFunctionCardinality;
 	return function;
 }
 
@@ -263,7 +274,7 @@ duckdb_state duckdb_register_table_function(duckdb_connection connection, duckdb
 		return DuckDBError;
 	}
 	con->context->RunFunctionInTransaction([&]() {
-		auto &catalog = duckdb::Catalog::GetCatalog(*con->context);
+		auto &catalog = duckdb::Catalog::GetSystemCatalog(*con->context);
 		duckdb::CreateTableFunctionInfo tf_info(*tf);
 
 		// create the function in the catalog
@@ -305,7 +316,7 @@ duckdb_value duckdb_bind_get_parameter(duckdb_bind_info info, idx_t index) {
 		return nullptr;
 	}
 	auto bind_info = (duckdb::CTableInternalBindInfo *)info;
-	return new duckdb::Value(bind_info->input.inputs[index]);
+	return reinterpret_cast<duckdb_value>(new duckdb::Value(bind_info->input.inputs[index]));
 }
 
 void duckdb_bind_set_bind_data(duckdb_bind_info info, void *bind_data, duckdb_delete_callback_t destroy) {
@@ -315,6 +326,18 @@ void duckdb_bind_set_bind_data(duckdb_bind_info info, void *bind_data, duckdb_de
 	auto bind_info = (duckdb::CTableInternalBindInfo *)info;
 	bind_info->bind_data.bind_data = bind_data;
 	bind_info->bind_data.delete_callback = destroy;
+}
+
+void duckdb_bind_set_cardinality(duckdb_bind_info info, idx_t cardinality, bool is_exact) {
+	if (!info) {
+		return;
+	}
+	auto bind_info = (duckdb::CTableInternalBindInfo *)info;
+	if (is_exact) {
+		bind_info->bind_data.stats = duckdb::make_unique<duckdb::NodeStatistics>(cardinality);
+	} else {
+		bind_info->bind_data.stats = duckdb::make_unique<duckdb::NodeStatistics>(cardinality, cardinality);
+	}
 }
 
 void duckdb_bind_set_error(duckdb_bind_info info, const char *error) {

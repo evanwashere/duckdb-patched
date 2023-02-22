@@ -6,7 +6,7 @@ RowDataCollection::RowDataCollection(BufferManager &buffer_manager, idx_t block_
                                      bool keep_pinned)
     : buffer_manager(buffer_manager), count(0), block_capacity(block_capacity), entry_size(entry_size),
       keep_pinned(keep_pinned) {
-	D_ASSERT(block_capacity * entry_size >= Storage::BLOCK_SIZE);
+	D_ASSERT(block_capacity * entry_size + entry_size > Storage::BLOCK_SIZE);
 }
 
 idx_t RowDataCollection::AppendToBlock(RowDataBlock &block, BufferHandle &handle,
@@ -42,9 +42,14 @@ idx_t RowDataCollection::AppendToBlock(RowDataBlock &block, BufferHandle &handle
 	return append_count;
 }
 
-vector<unique_ptr<BufferHandle>> RowDataCollection::Build(idx_t added_count, data_ptr_t key_locations[],
-                                                          idx_t entry_sizes[], const SelectionVector *sel) {
-	vector<unique_ptr<BufferHandle>> handles;
+RowDataBlock &RowDataCollection::CreateBlock() {
+	blocks.push_back(make_unique<RowDataBlock>(buffer_manager, block_capacity, entry_size));
+	return *blocks.back();
+}
+
+vector<BufferHandle> RowDataCollection::Build(idx_t added_count, data_ptr_t key_locations[], idx_t entry_sizes[],
+                                              const SelectionVector *sel) {
+	vector<BufferHandle> handles;
 	vector<BlockAppendEntry> append_entries;
 
 	// first allocate space of where to serialize the keys and payload columns
@@ -55,33 +60,32 @@ vector<unique_ptr<BufferHandle>> RowDataCollection::Build(idx_t added_count, dat
 		count += added_count;
 
 		if (!blocks.empty()) {
-			auto &last_block = blocks.back();
+			auto &last_block = *blocks.back();
 			if (last_block.count < last_block.capacity) {
 				// last block has space: pin the buffer of this block
 				auto handle = buffer_manager.Pin(last_block.block);
 				// now append to the block
-				idx_t append_count = AppendToBlock(last_block, *handle, append_entries, remaining, entry_sizes);
+				idx_t append_count = AppendToBlock(last_block, handle, append_entries, remaining, entry_sizes);
 				remaining -= append_count;
-				handles.push_back(move(handle));
+				handles.push_back(std::move(handle));
 			}
 		}
 		while (remaining > 0) {
 			// now for the remaining data, allocate new buffers to store the data and append there
-			RowDataBlock new_block(buffer_manager, block_capacity, entry_size);
+			auto &new_block = CreateBlock();
 			auto handle = buffer_manager.Pin(new_block.block);
 
 			// offset the entry sizes array if we have added entries already
 			idx_t *offset_entry_sizes = entry_sizes ? entry_sizes + added_count - remaining : nullptr;
 
-			idx_t append_count = AppendToBlock(new_block, *handle, append_entries, remaining, offset_entry_sizes);
+			idx_t append_count = AppendToBlock(new_block, handle, append_entries, remaining, offset_entry_sizes);
 			D_ASSERT(new_block.count > 0);
 			remaining -= append_count;
 
-			blocks.push_back(move(new_block));
 			if (keep_pinned) {
-				pinned_blocks.push_back(move(handle));
+				pinned_blocks.push_back(std::move(handle));
 			} else {
-				handles.push_back(move(handle));
+				handles.push_back(std::move(handle));
 			}
 		}
 	}
@@ -107,6 +111,9 @@ vector<unique_ptr<BufferHandle>> RowDataCollection::Build(idx_t added_count, dat
 }
 
 void RowDataCollection::Merge(RowDataCollection &other) {
+	if (other.count == 0) {
+		return;
+	}
 	RowDataCollection temp(buffer_manager, Storage::BLOCK_SIZE, 1);
 	{
 		//	One lock at a time to avoid deadlocks
@@ -114,19 +121,20 @@ void RowDataCollection::Merge(RowDataCollection &other) {
 		temp.count = other.count;
 		temp.block_capacity = other.block_capacity;
 		temp.entry_size = other.entry_size;
-		temp.blocks = move(other.blocks);
-		other.count = 0;
+		temp.blocks = std::move(other.blocks);
+		temp.pinned_blocks = std::move(other.pinned_blocks);
 	}
+	other.Clear();
 
 	lock_guard<mutex> write_lock(rdc_lock);
 	count += temp.count;
 	block_capacity = MaxValue(block_capacity, temp.block_capacity);
 	entry_size = MaxValue(entry_size, temp.entry_size);
 	for (auto &block : temp.blocks) {
-		blocks.emplace_back(move(block));
+		blocks.emplace_back(std::move(block));
 	}
 	for (auto &handle : temp.pinned_blocks) {
-		pinned_blocks.emplace_back(move(handle));
+		pinned_blocks.emplace_back(std::move(handle));
 	}
 }
 

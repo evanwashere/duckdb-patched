@@ -57,6 +57,18 @@ TEST_CASE("Test prepared statements in C API", "[capi]") {
 	REQUIRE(duckdb_hugeint_to_double(duckdb_value_hugeint(&res, 0, 0)) == 64.0);
 	duckdb_destroy_result(&res);
 
+	// Fetching a DECIMAL from a non-DECIMAL result returns 0
+	duckdb_decimal decimal = duckdb_double_to_decimal(634.3453, 7, 4);
+	duckdb_bind_decimal(stmt, 1, decimal);
+	status = duckdb_execute_prepared(stmt, &res);
+	REQUIRE(status == DuckDBSuccess);
+	duckdb_decimal result_decimal = duckdb_value_decimal(&res, 0, 0);
+	REQUIRE(result_decimal.scale == 0);
+	REQUIRE(result_decimal.width == 0);
+	REQUIRE(result_decimal.value.upper == 0);
+	REQUIRE(result_decimal.value.lower == 0);
+	duckdb_destroy_result(&res);
+
 	duckdb_bind_uint8(stmt, 1, 8);
 	status = duckdb_execute_prepared(stmt, &res);
 	REQUIRE(status == DuckDBSuccess);
@@ -125,7 +137,10 @@ TEST_CASE("Test prepared statements in C API", "[capi]") {
 	REQUIRE(status == DuckDBSuccess);
 	REQUIRE(stmt != nullptr);
 
-	REQUIRE(duckdb_bind_varchar_length(stmt, 1, "\x00\x40\x41", 3) == DuckDBError);
+	// invalid unicode
+	REQUIRE(duckdb_bind_varchar_length(stmt, 1, "\x80", 1) == DuckDBError);
+	// we can bind null values, though!
+	REQUIRE(duckdb_bind_varchar_length(stmt, 1, "\x00\x40\x41", 3) == DuckDBSuccess);
 	duckdb_bind_varchar_length(stmt, 1, "hello world", 5);
 	status = duckdb_execute_prepared(stmt, &res);
 	REQUIRE(status == DuckDBSuccess);
@@ -221,9 +236,13 @@ TEST_CASE("Test prepared statements in C API", "[capi]") {
 	status = duckdb_prepare(tester.connection, "SELECT SUM(i)*$1-$2 FROM a", &stmt);
 	REQUIRE(status == DuckDBSuccess);
 	REQUIRE(stmt != nullptr);
+	// clear bindings
+	duckdb_bind_int32(stmt, 1, 2);
+	REQUIRE(duckdb_clear_bindings(stmt) == DuckDBSuccess);
+
+	// bind again will succeed
 	duckdb_bind_int32(stmt, 1, 2);
 	duckdb_bind_int32(stmt, 2, 1000);
-
 	status = duckdb_execute_prepared(stmt, &res);
 	REQUIRE(status == DuckDBSuccess);
 	REQUIRE(duckdb_value_int32(&res, 0, 0) == 1000000);
@@ -249,4 +268,13 @@ TEST_CASE("Test prepared statements in C API", "[capi]") {
 	memcpy(malloced_data, "hello\0", 6);
 	REQUIRE(string((char *)malloced_data) == "hello");
 	duckdb_free(malloced_data);
+
+	status = duckdb_prepare(tester.connection, "SELECT sum(i) FROM a WHERE i > ?", &stmt);
+	REQUIRE(status == DuckDBSuccess);
+	REQUIRE(stmt != nullptr);
+	REQUIRE(duckdb_nparams(stmt) == 1);
+	REQUIRE(duckdb_param_type(nullptr, 0) == DUCKDB_TYPE_INVALID);
+	REQUIRE(duckdb_param_type(stmt, 1) == DUCKDB_TYPE_INTEGER);
+
+	duckdb_destroy_prepare(&stmt);
 }

@@ -9,11 +9,11 @@
 #pragma once
 
 #include "duckdb/common/common.hpp"
-#include "duckdb/common/mutex.hpp"
-#include "duckdb/parallel/pipeline.hpp"
-#include "duckdb/common/unordered_map.hpp"
-#include "duckdb/common/pair.hpp"
 #include "duckdb/common/enums/pending_execution_result.hpp"
+#include "duckdb/common/mutex.hpp"
+#include "duckdb/common/pair.hpp"
+#include "duckdb/common/unordered_map.hpp"
+#include "duckdb/parallel/pipeline.hpp"
 
 namespace duckdb {
 class ClientContext;
@@ -27,8 +27,7 @@ class Task;
 
 struct PipelineEventStack;
 struct ProducerToken;
-
-using event_map_t = unordered_map<const Pipeline *, PipelineEventStack>;
+struct ScheduleEventData;
 
 class Executor {
 	friend class Pipeline;
@@ -57,7 +56,8 @@ public:
 	unique_ptr<DataChunk> FetchChunk();
 
 	//! Push a new error
-	void PushError(ExceptionType type, const string &exception);
+	void PushError(PreservedError exception);
+
 	//! True if an error has been thrown
 	bool HasError();
 	//! Throw the exception that was pushed using PushError.
@@ -81,45 +81,48 @@ public:
 	}
 	void AddEvent(shared_ptr<Event> event);
 
-	void ReschedulePipelines(const vector<shared_ptr<Pipeline>> &pipelines, vector<shared_ptr<Event>> &events);
+	void AddRecursiveCTE(PhysicalOperator *rec_cte);
+	void ReschedulePipelines(const vector<shared_ptr<MetaPipeline>> &pipelines, vector<shared_ptr<Event>> &events);
 
 	//! Whether or not the root of the pipeline is a result collector object
 	bool HasResultCollector();
 	//! Returns the query result - can only be used if `HasResultCollector` returns true
 	unique_ptr<QueryResult> GetResult();
 
+	//! Returns true if all pipelines have been completed
+	bool ExecutionIsFinished();
+
 private:
 	void InitializeInternal(PhysicalOperator *physical_plan);
 
-	void ScheduleEvents();
-	void ScheduleEventsInternal(const vector<shared_ptr<Pipeline>> &pipelines,
-	                            unordered_map<Pipeline *, vector<shared_ptr<Pipeline>>> &child_pipelines,
-	                            vector<shared_ptr<Event>> &events, bool main_schedule = true);
+	void ScheduleEvents(const vector<shared_ptr<MetaPipeline>> &meta_pipelines);
+	static void ScheduleEventsInternal(ScheduleEventData &event_data);
 
-	void SchedulePipeline(const shared_ptr<Pipeline> &pipeline, event_map_t &event_map,
-	                      vector<shared_ptr<Event>> &events, bool complete_pipeline);
-	Pipeline *ScheduleUnionPipeline(const shared_ptr<Pipeline> &pipeline, const Pipeline *parent,
-	                                event_map_t &event_map, vector<shared_ptr<Event>> &events);
-	void ScheduleChildPipeline(Pipeline *parent, const shared_ptr<Pipeline> &pipeline, event_map_t &event_map,
-	                           vector<shared_ptr<Event>> &events);
-	void ExtractPipelines(shared_ptr<Pipeline> &pipeline, vector<shared_ptr<Pipeline>> &result);
+	static void VerifyScheduledEvents(const ScheduleEventData &event_data);
+	static void VerifyScheduledEventsInternal(const idx_t i, const vector<Event *> &vertices, vector<bool> &visited,
+	                                          vector<bool> &recursion_stack);
+
+	static void SchedulePipeline(const shared_ptr<MetaPipeline> &pipeline, ScheduleEventData &event_data);
+
 	bool NextExecutor();
 
-	void AddChildPipeline(Pipeline *current);
+	shared_ptr<Pipeline> CreateChildPipeline(Pipeline *current, PhysicalOperator *op);
 
 	void VerifyPipeline(Pipeline &pipeline);
 	void VerifyPipelines();
-	void ThrowExceptionInternal();
 
 private:
 	PhysicalOperator *physical_plan;
 	unique_ptr<PhysicalOperator> owned_plan;
 
 	mutex executor_lock;
-	//! The pipelines of the current query
+	mutex error_lock;
+	//! All pipelines of the query plan
 	vector<shared_ptr<Pipeline>> pipelines;
-	//! The root pipeline of the query
+	//! The root pipelines of the query
 	vector<shared_ptr<Pipeline>> root_pipelines;
+	//! The recursive CTE's in this query plan
+	vector<PhysicalOperator *> recursive_ctes;
 	//! The pipeline executor for the root pipeline
 	unique_ptr<PipelineExecutor> root_executor;
 	//! The current root pipeline index
@@ -127,7 +130,7 @@ private:
 	//! The producer of this query
 	unique_ptr<ProducerToken> producer;
 	//! Exceptions that occurred during the execution of the current query
-	vector<pair<ExceptionType, string>> exceptions;
+	vector<PreservedError> exceptions;
 	//! List of events
 	vector<shared_ptr<Event>> events;
 	//! The query profiler
@@ -137,17 +140,8 @@ private:
 	atomic<idx_t> completed_pipelines;
 	//! The total amount of pipelines in the query
 	idx_t total_pipelines;
-
-	//! The adjacent union pipelines of each pipeline
-	//! Union pipelines have the same sink, but can be run concurrently along with this pipeline
-	unordered_map<Pipeline *, vector<shared_ptr<Pipeline>>> union_pipelines;
-	//! Child pipelines of this pipeline
-	//! Like union pipelines, child pipelines share the same sink
-	//! Unlike union pipelines, child pipelines should be run AFTER their dependencies are completed
-	//! i.e. they should be run after the dependencies are completed, but before finalize is called on the sink
-	unordered_map<Pipeline *, vector<shared_ptr<Pipeline>>> child_pipelines;
-	//! Dependencies of child pipelines
-	unordered_map<Pipeline *, vector<Pipeline *>> child_dependencies;
+	//! Whether or not execution is cancelled
+	bool cancelled;
 
 	//! The last pending execution result (if any)
 	PendingExecutionResult execution_result;

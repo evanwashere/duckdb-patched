@@ -24,32 +24,46 @@ public:
 };
 
 template <bool GENERATE_SERIES>
+static void GenerateRangeParameters(const vector<Value> &inputs, RangeFunctionBindData &result) {
+	for (auto &input : inputs) {
+		if (input.IsNull()) {
+			result.start = GENERATE_SERIES ? 1 : 0;
+			result.end = 0;
+			result.increment = 1;
+			return;
+		}
+	}
+	if (inputs.size() < 2) {
+		// single argument: only the end is specified
+		result.start = 0;
+		result.end = inputs[0].GetValue<int64_t>();
+	} else {
+		// two arguments: first two arguments are start and end
+		result.start = inputs[0].GetValue<int64_t>();
+		result.end = inputs[1].GetValue<int64_t>();
+	}
+	if (inputs.size() < 3) {
+		result.increment = 1;
+	} else {
+		result.increment = inputs[2].GetValue<int64_t>();
+	}
+	if (result.increment == 0) {
+		throw BinderException("interval cannot be 0!");
+	}
+	if (result.start > result.end && result.increment > 0) {
+		throw BinderException("start is bigger than end, but increment is positive: cannot generate infinite series");
+	} else if (result.start < result.end && result.increment < 0) {
+		throw BinderException("start is smaller than end, but increment is negative: cannot generate infinite series");
+	}
+}
+
+template <bool GENERATE_SERIES>
 static unique_ptr<FunctionData> RangeFunctionBind(ClientContext &context, TableFunctionBindInput &input,
                                                   vector<LogicalType> &return_types, vector<string> &names) {
 	auto result = make_unique<RangeFunctionBindData>();
 	auto &inputs = input.inputs;
-	if (inputs.size() < 2) {
-		// single argument: only the end is specified
-		result->start = 0;
-		result->end = inputs[0].GetValue<int64_t>();
-	} else {
-		// two arguments: first two arguments are start and end
-		result->start = inputs[0].GetValue<int64_t>();
-		result->end = inputs[1].GetValue<int64_t>();
-	}
-	if (inputs.size() < 3) {
-		result->increment = 1;
-	} else {
-		result->increment = inputs[2].GetValue<int64_t>();
-	}
-	if (result->increment == 0) {
-		throw BinderException("interval cannot be 0!");
-	}
-	if (result->start > result->end && result->increment > 0) {
-		throw BinderException("start is bigger than end, but increment is positive: cannot generate infinite series");
-	} else if (result->start < result->end && result->increment < 0) {
-		throw BinderException("start is smaller than end, but increment is negative: cannot generate infinite series");
-	}
+	GenerateRangeParameters<GENERATE_SERIES>(inputs, *result);
+
 	return_types.emplace_back(LogicalType::BIGINT);
 	if (GENERATE_SERIES) {
 		// generate_series has inclusive bounds on the RHS
@@ -62,7 +76,7 @@ static unique_ptr<FunctionData> RangeFunctionBind(ClientContext &context, TableF
 	} else {
 		names.emplace_back("range");
 	}
-	return move(result);
+	return std::move(result);
 }
 
 struct RangeFunctionState : public GlobalTableFunctionState {
@@ -87,11 +101,11 @@ static void RangeFunction(ClientContext &context, TableFunctionInput &data_p, Da
 	if (!Hugeint::TryCast<int64_t>(current_value, current_value_i64)) {
 		return;
 	}
-	// set the result vector as a sequence vector
-	output.data[0].Sequence(current_value_i64, Hugeint::Cast<int64_t>(increment));
 	int64_t offset = increment < 0 ? 1 : -1;
 	idx_t remaining = MinValue<idx_t>(Hugeint::Cast<idx_t>((end - current_value + (increment + offset)) / increment),
 	                                  STANDARD_VECTOR_SIZE);
+	// set the result vector as a sequence vector
+	output.data[0].Sequence(current_value_i64, Hugeint::Cast<int64_t>(increment), remaining);
 	// increment the index pointer by the remaining count
 	state.current_idx += remaining;
 	output.SetCardinality(remaining);
@@ -181,7 +195,7 @@ static unique_ptr<FunctionData> RangeDateTimeBind(ClientContext &context, TableF
 		result->inclusive_bound = false;
 		names.emplace_back("range");
 	}
-	return move(result);
+	return std::move(result);
 }
 
 struct RangeDateTimeState : public GlobalTableFunctionState {

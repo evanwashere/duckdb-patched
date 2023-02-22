@@ -13,7 +13,7 @@ struct GlobFunctionBindData : public TableFunctionData {
 static unique_ptr<FunctionData> GlobFunctionBind(ClientContext &context, TableFunctionBindInput &input,
                                                  vector<LogicalType> &return_types, vector<string> &names) {
 	auto &config = DBConfig::GetConfig(context);
-	if (!config.enable_external_access) {
+	if (!config.options.enable_external_access) {
 		throw PermissionException("Globbing is disabled through configuration");
 	}
 	auto result = make_unique<GlobFunctionBindData>();
@@ -21,7 +21,7 @@ static unique_ptr<FunctionData> GlobFunctionBind(ClientContext &context, TableFu
 	result->files = fs.Glob(StringValue::Get(input.inputs[0]), context);
 	return_types.emplace_back(LogicalType::VARCHAR);
 	names.emplace_back("file");
-	return move(result);
+	return std::move(result);
 }
 
 struct GlobFunctionState : public GlobalTableFunctionState {

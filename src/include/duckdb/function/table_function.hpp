@@ -8,15 +8,17 @@
 
 #pragma once
 
+#include "duckdb/common/enums/operator_result_type.hpp"
+#include "duckdb/execution/execution_context.hpp"
 #include "duckdb/function/function.hpp"
 #include "duckdb/storage/statistics/node_statistics.hpp"
-#include "duckdb/common/enums/operator_result_type.hpp"
 
 #include <functional>
 
 namespace duckdb {
 
 class BaseStatistics;
+class DependencyList;
 class LogicalGet;
 class TableFilterSet;
 
@@ -58,51 +60,115 @@ struct TableFunctionBindInput {
 
 struct TableFunctionInitInput {
 	TableFunctionInitInput(const FunctionData *bind_data_p, const vector<column_t> &column_ids_p,
-	                       TableFilterSet *filters_p)
-	    : bind_data(bind_data_p), column_ids(column_ids_p), filters(filters_p) {
+	                       const vector<idx_t> &projection_ids_p, TableFilterSet *filters_p)
+	    : bind_data(bind_data_p), column_ids(column_ids_p), projection_ids(projection_ids_p), filters(filters_p) {
 	}
 
 	const FunctionData *bind_data;
 	const vector<column_t> &column_ids;
+	const vector<idx_t> projection_ids;
 	TableFilterSet *filters;
+
+	bool CanRemoveFilterColumns() const {
+		if (projection_ids.empty()) {
+			// Not set, can't remove filter columns
+			return false;
+		} else if (projection_ids.size() == column_ids.size()) {
+			// Filter column is used in remainder of plan, can't remove
+			return false;
+		} else {
+			// Less columns need to be projected out than that we scan
+			return true;
+		}
+	}
 };
 
 struct TableFunctionInput {
+public:
 	TableFunctionInput(const FunctionData *bind_data_p, LocalTableFunctionState *local_state_p,
 	                   GlobalTableFunctionState *global_state_p)
 	    : bind_data(bind_data_p), local_state(local_state_p), global_state(global_state_p) {
 	}
 
+public:
 	const FunctionData *bind_data;
 	LocalTableFunctionState *local_state;
 	GlobalTableFunctionState *global_state;
+};
+
+enum ScanType { TABLE, PARQUET };
+
+struct BindInfo {
+public:
+	explicit BindInfo(ScanType type_p) : type(type_p) {};
+	unordered_map<string, Value> options;
+	ScanType type;
+	void InsertOption(string name, Value value) {
+		if (options.find(name) != options.end()) {
+			throw InternalException("This option already exists");
+		}
+		options[name] = value;
+	}
+	template <class T>
+	T GetOption(string name) {
+		if (options.find(name) == options.end()) {
+			throw InternalException("This option does not exist");
+		}
+		return options[name].GetValue<T>();
+	}
+	template <class T>
+	vector<T> GetOptionList(string name) {
+		if (options.find(name) == options.end()) {
+			throw InternalException("This option does not exist");
+		}
+		auto option = options[name];
+		if (option.type().id() != LogicalTypeId::LIST) {
+			throw InternalException("This option is not a list");
+		}
+		vector<T> result;
+		auto list_children = ListValue::GetChildren(option);
+		for (auto &child : list_children) {
+			result.emplace_back(child.GetValue<T>());
+		}
+		return result;
+	}
 };
 
 typedef unique_ptr<FunctionData> (*table_function_bind_t)(ClientContext &context, TableFunctionBindInput &input,
                                                           vector<LogicalType> &return_types, vector<string> &names);
 typedef unique_ptr<GlobalTableFunctionState> (*table_function_init_global_t)(ClientContext &context,
                                                                              TableFunctionInitInput &input);
-typedef unique_ptr<LocalTableFunctionState> (*table_function_init_local_t)(ClientContext &context,
+typedef unique_ptr<LocalTableFunctionState> (*table_function_init_local_t)(ExecutionContext &context,
                                                                            TableFunctionInitInput &input,
                                                                            GlobalTableFunctionState *global_state);
 typedef unique_ptr<BaseStatistics> (*table_statistics_t)(ClientContext &context, const FunctionData *bind_data,
                                                          column_t column_index);
 typedef void (*table_function_t)(ClientContext &context, TableFunctionInput &data, DataChunk &output);
 
-typedef OperatorResultType (*table_in_out_function_t)(ClientContext &context, TableFunctionInput &data,
+typedef OperatorResultType (*table_in_out_function_t)(ExecutionContext &context, TableFunctionInput &data,
                                                       DataChunk &input, DataChunk &output);
+typedef OperatorFinalizeResultType (*table_in_out_function_final_t)(ExecutionContext &context, TableFunctionInput &data,
+                                                                    DataChunk &output);
 typedef idx_t (*table_function_get_batch_index_t)(ClientContext &context, const FunctionData *bind_data,
                                                   LocalTableFunctionState *local_state,
                                                   GlobalTableFunctionState *global_state);
+
+typedef BindInfo (*table_function_get_bind_info)(const FunctionData *bind_data);
+
 typedef double (*table_function_progress_t)(ClientContext &context, const FunctionData *bind_data,
                                             const GlobalTableFunctionState *global_state);
-typedef void (*table_function_dependency_t)(unordered_set<CatalogEntry *> &dependencies, const FunctionData *bind_data);
+typedef void (*table_function_dependency_t)(DependencyList &dependencies, const FunctionData *bind_data);
 typedef unique_ptr<NodeStatistics> (*table_function_cardinality_t)(ClientContext &context,
                                                                    const FunctionData *bind_data);
 typedef void (*table_function_pushdown_complex_filter_t)(ClientContext &context, LogicalGet &get,
                                                          FunctionData *bind_data,
                                                          vector<unique_ptr<Expression>> &filters);
 typedef string (*table_function_to_string_t)(const FunctionData *bind_data);
+
+typedef void (*table_function_serialize_t)(FieldWriter &writer, const FunctionData *bind_data,
+                                           const TableFunction &function);
+typedef unique_ptr<FunctionData> (*table_function_deserialize_t)(ClientContext &context, FieldReader &reader,
+                                                                 TableFunction &function);
 
 class TableFunction : public SimpleNamedParameterFunction {
 public:
@@ -132,6 +198,8 @@ public:
 	table_function_t function;
 	//! The table in-out function (if this is an in-out function)
 	table_in_out_function_t in_out_function;
+	//! The table in-out final function (if this is an in-out function)
+	table_in_out_function_final_t in_out_function_final;
 	//! (Optional) statistics function
 	//! Returns the statistics of a specified column
 	table_statistics_t statistics;
@@ -150,12 +218,21 @@ public:
 	table_function_progress_t table_scan_progress;
 	//! (Optional) returns the current batch index of the current scan operator
 	table_function_get_batch_index_t get_batch_index;
+	//! (Optional) returns the extra batch info, currently only used for the substrait extension
+	table_function_get_bind_info get_batch_info;
+
+	table_function_serialize_t serialize;
+	table_function_deserialize_t deserialize;
+
 	//! Whether or not the table function supports projection pushdown. If not supported a projection will be added
 	//! that filters out unused columns.
 	bool projection_pushdown;
 	//! Whether or not the table function supports filter pushdown. If not supported a filter will be added
 	//! that applies the table filter directly.
 	bool filter_pushdown;
+	//! Whether or not the table function can immediately prune out filter columns that are unused in the remainder of
+	//! the query plan, e.g., "SELECT i FROM tbl WHERE j = 42;" - j does not need to leave the table function at all
+	bool filter_prune;
 	//! Additional function info, passed to the bind
 	shared_ptr<TableFunctionInfo> function_info;
 };

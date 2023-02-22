@@ -8,7 +8,7 @@
 namespace duckdb {
 
 struct CurrentSettingBindData : public FunctionData {
-	explicit CurrentSettingBindData(Value value_p) : value(move(value_p)) {
+	explicit CurrentSettingBindData(Value value_p) : value(std::move(value_p)) {
 	}
 
 	Value value;
@@ -34,12 +34,14 @@ unique_ptr<FunctionData> CurrentSettingBind(ClientContext &context, ScalarFuncti
                                             vector<unique_ptr<Expression>> &arguments) {
 
 	auto &key_child = arguments[0];
-
+	if (key_child->return_type.id() == LogicalTypeId::UNKNOWN) {
+		throw ParameterNotResolvedException();
+	}
 	if (key_child->return_type.id() != LogicalTypeId::VARCHAR ||
 	    key_child->return_type.id() != LogicalTypeId::VARCHAR || !key_child->IsFoldable()) {
 		throw ParserException("Key name for current_setting needs to be a constant string");
 	}
-	Value key_val = ExpressionExecutor::EvaluateScalar(*key_child.get());
+	Value key_val = ExpressionExecutor::EvaluateScalar(context, *key_child.get());
 	D_ASSERT(key_val.type().id() == LogicalTypeId::VARCHAR);
 	auto &key_str = StringValue::Get(key_val);
 	if (key_val.IsNull() || key_str.empty()) {
@@ -57,8 +59,10 @@ unique_ptr<FunctionData> CurrentSettingBind(ClientContext &context, ScalarFuncti
 }
 
 void CurrentSettingFun::RegisterFunction(BuiltinFunctions &set) {
-	set.AddFunction(ScalarFunction("current_setting", {LogicalType::VARCHAR}, LogicalType::ANY, CurrentSettingFunction,
-	                               false, CurrentSettingBind));
+	auto fun = ScalarFunction("current_setting", {LogicalType::VARCHAR}, LogicalType::ANY, CurrentSettingFunction,
+	                          CurrentSettingBind);
+	fun.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+	set.AddFunction(fun);
 }
 
 } // namespace duckdb

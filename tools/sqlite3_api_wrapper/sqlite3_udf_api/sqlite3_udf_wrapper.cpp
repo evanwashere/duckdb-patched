@@ -10,13 +10,14 @@ duckdb::scalar_function_t duckdb::SQLiteUDFWrapper::CreateSQLiteScalarFunction(d
 		DataChunk cast_chunk;
 		CastSQLite::InputVectorsToVarchar(args, cast_chunk);
 
-		// Orrify all input colunms
-		unique_ptr<VectorData[]> vec_data = cast_chunk.Orrify();
+		// ToUnifiedFormat all input colunms
+		unique_ptr<UnifiedVectorFormat[]> vec_data = cast_chunk.ToUnifiedFormat();
 
 		// Vector of sqlite3_value for all input columns
 		vector<unique_ptr<vector<sqlite3_value>>> vec_sqlite(cast_chunk.ColumnCount());
 		// Casting input data to vectors of sqlite_value
-		VectorType result_vec_type = CastSQLite::ToVectorsSQLiteValue(cast_chunk, result, vec_sqlite, move(vec_data));
+		VectorType result_vec_type =
+		    CastSQLite::ToVectorsSQLiteValue(cast_chunk, result, vec_sqlite, std::move(vec_data));
 		result.SetVectorType(result_vec_type);
 
 		SQLiteTypeValue res_sqlite_value_type =

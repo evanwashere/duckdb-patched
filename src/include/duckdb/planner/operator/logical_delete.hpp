@@ -11,31 +11,24 @@
 #include "duckdb/planner/logical_operator.hpp"
 
 namespace duckdb {
+class TableCatalogEntry;
 
 class LogicalDelete : public LogicalOperator {
 public:
-	explicit LogicalDelete(TableCatalogEntry *table)
-	    : LogicalOperator(LogicalOperatorType::LOGICAL_DELETE), table(table), table_index(0), return_chunk(false) {
-	}
+	explicit LogicalDelete(TableCatalogEntry *table, idx_t table_index);
 
 	TableCatalogEntry *table;
 	idx_t table_index;
 	bool return_chunk;
 
-protected:
-	vector<ColumnBinding> GetColumnBindings() override {
-		if (return_chunk) {
-			return GenerateColumnBindings(table_index, table->columns.size());
-		}
-		return {ColumnBinding(0, 0)};
-	}
+public:
+	void Serialize(FieldWriter &writer) const override;
+	static unique_ptr<LogicalOperator> Deserialize(LogicalDeserializationState &state, FieldReader &reader);
+	idx_t EstimateCardinality(ClientContext &context) override;
+	vector<idx_t> GetTableIndex() const override;
 
-	void ResolveTypes() override {
-		if (return_chunk) {
-			types = table->GetTypes();
-		} else {
-			types.emplace_back(LogicalType::BIGINT);
-		}
-	}
+protected:
+	vector<ColumnBinding> GetColumnBindings() override;
+	void ResolveTypes() override;
 };
 } // namespace duckdb

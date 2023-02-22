@@ -6,35 +6,64 @@
 
 namespace duckdb {
 
-ExpressionExecutor::ExpressionExecutor() {
+ExpressionExecutor::ExpressionExecutor(ClientContext &context) : context(&context) {
 }
 
-ExpressionExecutor::ExpressionExecutor(const Expression *expression) : ExpressionExecutor() {
+ExpressionExecutor::ExpressionExecutor(ClientContext &context, const Expression *expression)
+    : ExpressionExecutor(context) {
 	D_ASSERT(expression);
 	AddExpression(*expression);
 }
 
-ExpressionExecutor::ExpressionExecutor(const Expression &expression) : ExpressionExecutor() {
+ExpressionExecutor::ExpressionExecutor(ClientContext &context, const Expression &expression)
+    : ExpressionExecutor(context) {
 	AddExpression(expression);
 }
 
-ExpressionExecutor::ExpressionExecutor(const vector<unique_ptr<Expression>> &exprs) : ExpressionExecutor() {
+ExpressionExecutor::ExpressionExecutor(ClientContext &context, const vector<unique_ptr<Expression>> &exprs)
+    : ExpressionExecutor(context) {
 	D_ASSERT(exprs.size() > 0);
 	for (auto &expr : exprs) {
 		AddExpression(*expr);
 	}
 }
 
+ExpressionExecutor::ExpressionExecutor(const vector<unique_ptr<Expression>> &exprs) : context(nullptr) {
+	D_ASSERT(exprs.size() > 0);
+	for (auto &expr : exprs) {
+		AddExpression(*expr);
+	}
+}
+
+ExpressionExecutor::ExpressionExecutor() : context(nullptr) {
+}
+
+bool ExpressionExecutor::HasContext() {
+	return context;
+}
+
+ClientContext &ExpressionExecutor::GetContext() {
+	if (!context) {
+		throw InternalException("Calling ExpressionExecutor::GetContext on an expression executor without a context");
+	}
+	return *context;
+}
+
+Allocator &ExpressionExecutor::GetAllocator() {
+	return context ? Allocator::Get(*context) : Allocator::DefaultAllocator();
+}
+
 void ExpressionExecutor::AddExpression(const Expression &expr) {
 	expressions.push_back(&expr);
 	auto state = make_unique<ExpressionExecutorState>(expr.ToString());
 	Initialize(expr, *state);
-	states.push_back(move(state));
+	state->Verify();
+	states.push_back(std::move(state));
 }
 
 void ExpressionExecutor::Initialize(const Expression &expression, ExpressionExecutorState &state) {
-	state.root_state = InitializeState(expression, state);
 	state.executor = this;
+	state.root_state = InitializeState(expression, state);
 }
 
 void ExpressionExecutor::Execute(DataChunk *input, DataChunk &result) {
@@ -76,25 +105,27 @@ void ExpressionExecutor::ExecuteExpression(idx_t expr_idx, Vector &result) {
 	states[expr_idx]->profiler.EndSample(chunk ? chunk->size() : 0);
 }
 
-Value ExpressionExecutor::EvaluateScalar(const Expression &expr) {
-	D_ASSERT(expr.IsFoldable());
+Value ExpressionExecutor::EvaluateScalar(ClientContext &context, const Expression &expr, bool allow_unfoldable) {
+	D_ASSERT(allow_unfoldable || expr.IsFoldable());
 	D_ASSERT(expr.IsScalar());
 	// use an ExpressionExecutor to execute the expression
-	ExpressionExecutor executor(expr);
+	ExpressionExecutor executor(context, expr);
 
 	Vector result(expr.return_type);
 	executor.ExecuteExpression(result);
 
-	D_ASSERT(result.GetVectorType() == VectorType::CONSTANT_VECTOR);
+	D_ASSERT(allow_unfoldable || result.GetVectorType() == VectorType::CONSTANT_VECTOR);
 	auto result_value = result.GetValue(0);
 	D_ASSERT(result_value.type().InternalType() == expr.return_type.InternalType());
 	return result_value;
 }
 
-bool ExpressionExecutor::TryEvaluateScalar(const Expression &expr, Value &result) {
+bool ExpressionExecutor::TryEvaluateScalar(ClientContext &context, const Expression &expr, Value &result) {
 	try {
-		result = EvaluateScalar(expr);
+		result = EvaluateScalar(context, expr);
 		return true;
+	} catch (InternalException &ex) {
+		throw ex;
 	} catch (...) {
 		return false;
 	}
@@ -139,6 +170,7 @@ unique_ptr<ExpressionState> ExpressionExecutor::InitializeState(const Expression
 void ExpressionExecutor::Execute(const Expression &expr, ExpressionState *state, const SelectionVector *sel,
                                  idx_t count, Vector &result) {
 #ifdef DEBUG
+	//! The result Vector must be "clean"
 	if (result.GetVectorType() == VectorType::FLAT_VECTOR) {
 		D_ASSERT(FlatVector::Validity(result).CheckAllValid(count));
 	}
@@ -229,7 +261,7 @@ static inline idx_t DefaultSelectLoop(const SelectionVector *bsel, uint8_t *__re
 }
 
 template <bool NO_NULL>
-static inline idx_t DefaultSelectSwitch(VectorData &idata, const SelectionVector *sel, idx_t count,
+static inline idx_t DefaultSelectSwitch(UnifiedVectorFormat &idata, const SelectionVector *sel, idx_t count,
                                         SelectionVector *true_sel, SelectionVector *false_sel) {
 	if (true_sel && false_sel) {
 		return DefaultSelectLoop<NO_NULL, true, true>(idata.sel, (uint8_t *)idata.data, idata.validity, sel, count,
@@ -253,8 +285,8 @@ idx_t ExpressionExecutor::DefaultSelect(const Expression &expr, ExpressionState 
 	Vector intermediate(LogicalType::BOOLEAN, (data_ptr_t)intermediate_bools);
 	Execute(expr, state, sel, count, intermediate);
 
-	VectorData idata;
-	intermediate.Orrify(count, idata);
+	UnifiedVectorFormat idata;
+	intermediate.ToUnifiedFormat(count, idata);
 
 	if (!sel) {
 		sel = FlatVector::IncrementalSelectionVector();

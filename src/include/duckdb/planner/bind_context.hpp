@@ -9,8 +9,6 @@
 #pragma once
 
 #include "duckdb/catalog/catalog.hpp"
-#include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
-#include "duckdb/catalog/catalog_entry/table_function_catalog_entry.hpp"
 #include "duckdb/common/case_insensitive_map.hpp"
 #include "duckdb/common/unordered_map.hpp"
 #include "duckdb/common/unordered_set.hpp"
@@ -27,6 +25,9 @@ class LogicalGet;
 class BoundQueryNode;
 
 class StarExpression;
+
+class TableCatalogEntry;
+class TableFunctionCatalogEntry;
 
 struct UsingColumnSet {
 	string primary_binding;
@@ -63,6 +64,8 @@ public:
 	unique_ptr<ParsedExpression> CreateColumnReference(const string &table_name, const string &column_name);
 	unique_ptr<ParsedExpression> CreateColumnReference(const string &schema_name, const string &table_name,
 	                                                   const string &column_name);
+	unique_ptr<ParsedExpression> CreateColumnReference(const string &catalog_name, const string &schema_name,
+	                                                   const string &table_name, const string &column_name);
 
 	//! Generate column expressions for all columns that are present in the
 	//! referenced tables. This is used to resolve the * expression in a
@@ -80,10 +83,10 @@ public:
 
 	//! Adds a base table with the given alias to the BindContext.
 	void AddBaseTable(idx_t index, const string &alias, const vector<string> &names, const vector<LogicalType> &types,
-	                  LogicalGet &get);
+	                  vector<column_t> &bound_column_ids, StandardEntry *entry, bool add_row_id = true);
 	//! Adds a call to a table function with the given alias to the BindContext.
 	void AddTableFunction(idx_t index, const string &alias, const vector<string> &names,
-	                      const vector<LogicalType> &types, LogicalGet &get);
+	                      const vector<LogicalType> &types, vector<column_t> &bound_column_ids, StandardEntry *entry);
 	//! Adds a table view with a given alias to the BindContext.
 	void AddView(idx_t index, const string &alias, SubqueryRef &ref, BoundQueryNode &subquery, ViewCatalogEntry *view);
 	//! Adds a subquery with a given alias to the BindContext.

@@ -9,6 +9,7 @@
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/common/likely.hpp"
 #include "duckdb/storage/statistics/numeric_statistics.hpp"
+#include "duckdb/common/types/bit.hpp"
 #include <cmath>
 #include <errno.h>
 
@@ -62,10 +63,9 @@ void NextAfterFun::RegisterFunction(BuiltinFunctions &set) {
 	ScalarFunctionSet next_after_fun("nextafter");
 	next_after_fun.AddFunction(
 	    ScalarFunction("nextafter", {LogicalType::DOUBLE, LogicalType::DOUBLE}, LogicalType::DOUBLE,
-	                   ScalarFunction::BinaryFunction<double, double, double, NextAfterOperator>, false));
+	                   ScalarFunction::BinaryFunction<double, double, double, NextAfterOperator>));
 	next_after_fun.AddFunction(ScalarFunction("nextafter", {LogicalType::FLOAT, LogicalType::FLOAT}, LogicalType::FLOAT,
-	                                          ScalarFunction::BinaryFunction<float, float, float, NextAfterOperator>,
-	                                          false));
+	                                          ScalarFunction::BinaryFunction<float, float, float, NextAfterOperator>));
 	set.AddFunction(next_after_fun);
 }
 
@@ -124,17 +124,17 @@ static unique_ptr<BaseStatistics> PropagateAbsStats(ClientContext &context, Func
 			max_val = MaxValue(AbsValue(current_min), current_max);
 		} else {
 			// if both current_min and current_max are > 0, then the abs is a no-op and can be removed entirely
-			*input.expr_ptr = move(input.expr.children[0]);
-			return move(child_stats[0]);
+			*input.expr_ptr = std::move(input.expr.children[0]);
+			return std::move(child_stats[0]);
 		}
 		new_min = Value::Numeric(expr.return_type, min_val);
 		new_max = Value::Numeric(expr.return_type, max_val);
 		expr.function.function = ScalarFunction::GetScalarUnaryFunction<AbsOperator>(expr.return_type);
 	}
-	auto stats =
-	    make_unique<NumericStatistics>(expr.return_type, move(new_min), move(new_max), StatisticsType::LOCAL_STATS);
+	auto stats = make_unique<NumericStatistics>(expr.return_type, std::move(new_min), std::move(new_max),
+	                                            StatisticsType::LOCAL_STATS);
 	stats->validity_stats = lstats.validity_stats->Copy();
-	return move(stats);
+	return std::move(stats);
 }
 
 template <class OP>
@@ -165,7 +165,7 @@ void AbsFun::RegisterFunction(BuiltinFunctions &set) {
 	for (auto &type : LogicalType::Numeric()) {
 		switch (type.id()) {
 		case LogicalTypeId::DECIMAL:
-			abs.AddFunction(ScalarFunction({type}, type, nullptr, false, false, DecimalUnaryOpBind<AbsOperator>));
+			abs.AddFunction(ScalarFunction({type}, type, nullptr, DecimalUnaryOpBind<AbsOperator>));
 			break;
 		case LogicalTypeId::TINYINT:
 		case LogicalTypeId::SMALLINT:
@@ -200,9 +200,33 @@ struct BitCntOperator {
 	static inline TR Operation(TA input) {
 		using TU = typename std::make_unsigned<TA>::type;
 		TR count = 0;
-		for (auto value = TU(input); value > 0; value >>= 1) {
-			count += TR(value & 1);
+		for (auto value = TU(input); value; ++count) {
+			value &= (value - 1);
 		}
+		return count;
+	}
+};
+
+struct HugeIntBitCntOperator {
+	template <class TA, class TR>
+	static inline TR Operation(TA input) {
+		using TU = typename std::make_unsigned<int64_t>::type;
+		TR count = 0;
+
+		for (auto value = TU(input.upper); value; ++count) {
+			value &= (value - 1);
+		}
+		for (auto value = TU(input.lower); value; ++count) {
+			value &= (value - 1);
+		}
+		return count;
+	}
+};
+
+struct BitStringBitCntOperator {
+	template <class TA, class TR>
+	static inline TR Operation(TA input) {
+		TR count = Bit::BitCount(input);
 		return count;
 	}
 };
@@ -217,6 +241,10 @@ void BitCountFun::RegisterFunction(BuiltinFunctions &set) {
 	                                     ScalarFunction::UnaryFunction<int32_t, int8_t, BitCntOperator>));
 	functions.AddFunction(ScalarFunction({LogicalType::BIGINT}, LogicalType::TINYINT,
 	                                     ScalarFunction::UnaryFunction<int64_t, int8_t, BitCntOperator>));
+	functions.AddFunction(ScalarFunction({LogicalType::HUGEINT}, LogicalType::TINYINT,
+	                                     ScalarFunction::UnaryFunction<hugeint_t, int8_t, HugeIntBitCntOperator>));
+	functions.AddFunction(ScalarFunction({LogicalType::BIT}, LogicalType::BIGINT,
+	                                     ScalarFunction::UnaryFunction<string_t, idx_t, BitStringBitCntOperator>));
 	set.AddFunction(functions);
 }
 
@@ -356,7 +384,7 @@ void CeilFun::RegisterFunction(BuiltinFunctions &set) {
 		default:
 			throw InternalException("Unimplemented numeric type for function \"ceil\"");
 		}
-		ceil.AddFunction(ScalarFunction({type}, type, func, false, false, bind_func));
+		ceil.AddFunction(ScalarFunction({type}, type, func, bind_func));
 	}
 
 	set.AddFunction(ceil);
@@ -412,7 +440,7 @@ void FloorFun::RegisterFunction(BuiltinFunctions &set) {
 		default:
 			throw InternalException("Unimplemented numeric type for function \"floor\"");
 		}
-		floor.AddFunction(ScalarFunction({type}, type, func, false, false, bind_func));
+		floor.AddFunction(ScalarFunction({type}, type, func, bind_func));
 	}
 	set.AddFunction(floor);
 }
@@ -537,10 +565,13 @@ static void DecimalRoundPositivePrecisionFunction(DataChunk &input, ExpressionSt
 unique_ptr<FunctionData> BindDecimalRoundPrecision(ClientContext &context, ScalarFunction &bound_function,
                                                    vector<unique_ptr<Expression>> &arguments) {
 	auto &decimal_type = arguments[0]->return_type;
+	if (arguments[1]->HasParameter()) {
+		throw ParameterNotResolvedException();
+	}
 	if (!arguments[1]->IsFoldable()) {
 		throw NotImplementedException("ROUND(DECIMAL, INTEGER) with non-constant precision is not supported");
 	}
-	Value val = ExpressionExecutor::EvaluateScalar(*arguments[1]).CastAs(LogicalType::INTEGER);
+	Value val = ExpressionExecutor::EvaluateScalar(context, *arguments[1]).DefaultCastAs(LogicalType::INTEGER);
 	if (val.IsNull()) {
 		throw NotImplementedException("ROUND(DECIMAL, INTEGER) with non-constant precision is not supported");
 	}
@@ -624,9 +655,8 @@ void RoundFun::RegisterFunction(BuiltinFunctions &set) {
 		default:
 			throw InternalException("Unimplemented numeric type for function \"floor\"");
 		}
-		round.AddFunction(ScalarFunction({type}, type, round_func, false, false, bind_func));
-		round.AddFunction(
-		    ScalarFunction({type, LogicalType::INTEGER}, type, round_prec_func, false, false, bind_prec_func));
+		round.AddFunction(ScalarFunction({type}, type, round_func, bind_func));
+		round.AddFunction(ScalarFunction({type, LogicalType::INTEGER}, type, round_prec_func, bind_prec_func));
 	}
 	set.AddFunction(round);
 }
@@ -824,6 +854,25 @@ void IsNanFun::RegisterFunction(BuiltinFunctions &set) {
 	                                 ScalarFunction::UnaryFunction<float, bool, IsNanOperator>));
 	funcs.AddFunction(ScalarFunction({LogicalType::DOUBLE}, LogicalType::BOOLEAN,
 	                                 ScalarFunction::UnaryFunction<double, bool, IsNanOperator>));
+	set.AddFunction(funcs);
+}
+
+//===--------------------------------------------------------------------===//
+// signbit
+//===--------------------------------------------------------------------===//
+struct SignBitOperator {
+	template <class TA, class TR>
+	static inline TR Operation(TA input) {
+		return std::signbit(input);
+	}
+};
+
+void SignBitFun::RegisterFunction(BuiltinFunctions &set) {
+	ScalarFunctionSet funcs("signbit");
+	funcs.AddFunction(ScalarFunction({LogicalType::FLOAT}, LogicalType::BOOLEAN,
+	                                 ScalarFunction::UnaryFunction<float, bool, SignBitOperator>));
+	funcs.AddFunction(ScalarFunction({LogicalType::DOUBLE}, LogicalType::BOOLEAN,
+	                                 ScalarFunction::UnaryFunction<double, bool, SignBitOperator>));
 	set.AddFunction(funcs);
 }
 

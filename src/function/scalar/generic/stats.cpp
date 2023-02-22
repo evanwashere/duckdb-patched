@@ -4,7 +4,7 @@
 namespace duckdb {
 
 struct StatsBindData : public FunctionData {
-	explicit StatsBindData(string stats_p = string()) : stats(move(stats_p)) {
+	explicit StatsBindData(string stats_p = string()) : stats(std::move(stats_p)) {
 	}
 
 	string stats;
@@ -46,8 +46,11 @@ static unique_ptr<BaseStatistics> StatsPropagateStats(ClientContext &context, Fu
 }
 
 void StatsFun::RegisterFunction(BuiltinFunctions &set) {
-	set.AddFunction(ScalarFunction("stats", {LogicalType::ANY}, LogicalType::VARCHAR, StatsFunction, true, StatsBind,
-	                               nullptr, StatsPropagateStats));
+	ScalarFunction stats("stats", {LogicalType::ANY}, LogicalType::VARCHAR, StatsFunction, StatsBind, nullptr,
+	                     StatsPropagateStats);
+	stats.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+	stats.side_effects = FunctionSideEffects::HAS_SIDE_EFFECTS;
+	set.AddFunction(stats);
 }
 
 } // namespace duckdb

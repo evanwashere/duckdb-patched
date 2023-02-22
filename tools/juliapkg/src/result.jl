@@ -14,7 +14,8 @@ mutable struct QueryResult
 end
 
 function _close_result(result::QueryResult)
-    return duckdb_destroy_result(result.handle)
+    duckdb_destroy_result(result.handle)
+    return
 end
 
 mutable struct ColumnConversionData
@@ -268,7 +269,7 @@ function convert_vector_struct(
     return size
 end
 
-function convert_vector_map(
+function convert_vector_union(
     column_data::ColumnConversionData,
     vector::Vec,
     size::UInt64,
@@ -280,18 +281,73 @@ function convert_vector_map(
     ::Type{DST}
 ) where {SRC, DST}
     child_arrays = convert_struct_children(column_data, vector, size)
+
+    if !all_valid
+        validity = get_validity(vector)
+    end
+    for row in 1:size
+        # For every row/record
+        if all_valid || isvalid(validity, row)
+            # Get the tag of this row
+            tag::UInt64 = child_arrays[1][row]
+            type::DataType = duckdb_type_to_julia_type(get_union_member_type(column_data.logical_type, tag + 1))
+            # Get the value from the child array indicated by the tag
+            # Offset by 1 because of julia
+            # Offset by another 1 because of the tag vector
+            value = child_arrays[tag + 2][row]
+            result[position] = isequal(value, missing) ? missing : type(value)
+        end
+        position += 1
+    end
+    return size
+end
+
+function convert_vector_map(
+    column_data::ColumnConversionData,
+    vector::Vec,
+    size::UInt64,
+    convert_func::Function,
+    result,
+    position,
+    all_valid,
+    ::Type{SRC},
+    ::Type{DST}
+) where {SRC, DST}
+    child_vector = list_child(vector)
+    lsize = list_size(vector)
+
+    # convert the child vector
+    ldata = column_data.conversion_data
+
+    child_column_data =
+        ColumnConversionData(column_data.chunks, column_data.col_idx, ldata.child_type, ldata.child_conversion_data)
+    child_array = Array{Union{Missing, ldata.target_type}}(missing, lsize)
+    ldata.conversion_loop_func(
+        child_column_data,
+        child_vector,
+        lsize,
+        ldata.conversion_func,
+        child_array,
+        1,
+        false,
+        ldata.internal_type,
+        ldata.target_type
+    )
+    child_arrays = convert_struct_children(child_column_data, child_vector, lsize)
     keys = child_arrays[1]
     values = child_arrays[2]
 
+    array = get_array(vector, SRC)
     if !all_valid
         validity = get_validity(vector)
     end
     for i in 1:size
         if all_valid || isvalid(validity, i)
             result_dict = Dict()
-            key_count = length(keys[i])
-            for key_idx in 1:key_count
-                result_dict[keys[i][key_idx]] = values[i][key_idx]
+            start_offset::UInt64 = array[i].offset + 1
+            end_offset::UInt64 = array[i].offset + array[i].length
+            for key_idx in start_offset:end_offset
+                result_dict[keys[key_idx]] = values[key_idx]
             end
             result[position] = result_dict
         end
@@ -378,16 +434,26 @@ function init_conversion_loop(logical_type::LogicalType)
         return duckdb_type_to_julia_type(logical_type)
     elseif type == DUCKDB_TYPE_ENUM
         return get_enum_dictionary(logical_type)
-    elseif type == DUCKDB_TYPE_LIST
+    elseif type == DUCKDB_TYPE_LIST || type == DUCKDB_TYPE_MAP
         child_type = get_list_child_type(logical_type)
         return create_child_conversion_data(child_type)
-    elseif type == DUCKDB_TYPE_STRUCT || type == DUCKDB_TYPE_MAP
-        child_count = get_struct_child_count(logical_type)
+    elseif type == DUCKDB_TYPE_STRUCT || type == DUCKDB_TYPE_UNION
+        child_count_fun::Function = get_struct_child_count
+        child_type_fun::Function = get_struct_child_type
+        child_name_fun::Function = get_struct_child_name
+
+        #if type == DUCKDB_TYPE_UNION
+        #	child_count_fun = get_union_member_count
+        #	child_type_fun = get_union_member_type
+        #	child_name_fun = get_union_member_name
+        #end
+
+        child_count = child_count_fun(logical_type)
         child_symbols::Vector{Symbol} = Vector()
         child_data::Vector{ListConversionData} = Vector()
         for i in 1:child_count
-            child_symbol = Symbol(get_struct_child_name(logical_type, i))
-            child_type = get_struct_child_type(logical_type, i)
+            child_symbol = Symbol(child_name_fun(logical_type, i))
+            child_type = child_type_fun(logical_type, i)
             child_conv_data = create_child_conversion_data(child_type)
             push!(child_symbols, child_symbol)
             push!(child_data, child_conv_data)
@@ -400,9 +466,9 @@ end
 
 function get_conversion_function(logical_type::LogicalType)::Function
     type = get_type_id(logical_type)
-    if type == DUCKDB_TYPE_VARCHAR || type == DUCKDB_TYPE_JSON
+    if type == DUCKDB_TYPE_VARCHAR
         return convert_string
-    elseif type == DUCKDB_TYPE_BLOB
+    elseif type == DUCKDB_TYPE_BLOB || type == DUCKDB_TYPE_BIT
         return convert_blob
     elseif type == DUCKDB_TYPE_DATE
         return convert_date
@@ -438,7 +504,7 @@ end
 
 function get_conversion_loop_function(logical_type::LogicalType)::Function
     type = get_type_id(logical_type)
-    if type == DUCKDB_TYPE_VARCHAR || type == DUCKDB_TYPE_BLOB || type == DUCKDB_TYPE_JSON
+    if type == DUCKDB_TYPE_VARCHAR || type == DUCKDB_TYPE_BLOB || type == DUCKDB_TYPE_BIT
         return convert_vector_string
     elseif type == DUCKDB_TYPE_LIST
         return convert_vector_list
@@ -446,6 +512,8 @@ function get_conversion_loop_function(logical_type::LogicalType)::Function
         return convert_vector_struct
     elseif type == DUCKDB_TYPE_MAP
         return convert_vector_map
+    elseif type == DUCKDB_TYPE_UNION
+        return convert_vector_union
     else
         return convert_vector
     end
@@ -497,42 +565,136 @@ function toDataFrame(result::Ref{duckdb_result})::DataFrame
     return df
 end
 
-function execute_tasks(db::DuckDBHandle)
-    duckdb_execute_tasks(db.handle, typemax(UInt64))
+mutable struct PendingQueryResult
+    handle::duckdb_pending_result
+    success::Bool
+
+    function PendingQueryResult(stmt::Stmt)
+        pending_handle = Ref{duckdb_pending_result}()
+        ret = duckdb_pending_prepared(stmt.handle, pending_handle)
+        result = new(pending_handle[], ret == DuckDBSuccess)
+        finalizer(_close_pending_result, result)
+        return result
+    end
+end
+
+function _close_pending_result(pending::PendingQueryResult)
+    if pending.handle == C_NULL
+        return
+    end
+    duckdb_destroy_pending(pending.handle)
+    pending.handle = C_NULL
     return
 end
 
-function cleanup_tasks(tasks)
-    for task in tasks
-        Base.wait(task)
+function fetch_error(stmt::Stmt, error_ptr)
+    if error_ptr == C_NULL
+        return string("Execute of query \"", stmt.sql, "\" failed: unknown error")
+    else
+        return string("Execute of query \"", stmt.sql, "\" failed: ", unsafe_string(error_ptr))
     end
 end
 
+function get_error(stmt::Stmt, pending::PendingQueryResult)
+    error_ptr = duckdb_pending_error(pending.handle)
+    error_message = fetch_error(stmt, error_ptr)
+    _close_pending_result(pending)
+    return error_message
+end
+
+# execute tasks from a pending query result in a loop
+function pending_execute_tasks(pending::PendingQueryResult)::Bool
+    ret = DUCKDB_PENDING_RESULT_NOT_READY
+    while ret == DUCKDB_PENDING_RESULT_NOT_READY
+        GC.safepoint()
+        ret = duckdb_pending_execute_task(pending.handle)
+    end
+    return ret != DUCKDB_PENDING_ERROR
+end
+
+# execute background tasks in a loop, until task execution is finished
+function execute_tasks(state::duckdb_task_state, con::Connection)
+    while !duckdb_task_state_is_finished(state)
+        GC.safepoint()
+        duckdb_execute_n_tasks_state(state, 1)
+        if duckdb_execution_is_finished(con.handle)
+            break
+        end
+    end
+    return
+end
+
+# cleanup background tasks
+function cleanup_tasks(tasks, state)
+    # mark execution as finished so the individual tasks will quit
+    duckdb_finish_execution(state)
+    # now wait for all tasks to finish executing
+    exceptions = []
+    for task in tasks
+        try
+            Base.wait(task)
+        catch ex
+            push!(exceptions, ex)
+        end
+    end
+    # clean up the tasks and task state
+    empty!(tasks)
+    duckdb_destroy_task_state(state)
+
+    # if any tasks threw, propagate the error upwards by throwing as well
+    for ex in exceptions
+        throw(ex)
+    end
+    return
+end
+
+# this function is responsible for executing a statement and returning a result
 function execute(stmt::Stmt, params::DBInterface.StatementParams = ())
     bind_parameters(stmt, params)
 
-    handle = Ref{duckdb_result}()
-    # if multi-threading is enabled, launch tasks
+    # first create a pending query result
+    pending = PendingQueryResult(stmt)
+    if !pending.success
+        throw(QueryException(get_error(stmt, pending)))
+    end
+    # if multi-threading is enabled, launch background tasks
+    task_state = duckdb_create_task_state(stmt.con.db.handle)
+
+    # We can't use all of the additional threads, or the main thread would halt
     tasks = []
-    for i in 2:Threads.nthreads()
-        task_val = @spawn execute_tasks(stmt.con.db)
+    for _ in 2:Threads.nthreads()
+        task_val = @spawn execute_tasks(task_state, stmt.con)
         push!(tasks, task_val)
     end
-    ret = DuckDBSuccess
-    try
-        ret = duckdb_execute_prepared(stmt.handle, handle)
-    catch ex
-        cleanup_tasks(tasks)
-        throw(ex)
+    success = true
+    if Threads.nthreads() != 1
+        # When we have additional worker threads, don't execute using the main thread
+        while duckdb_execution_is_finished(stmt.con.handle) == false
+            GC.safepoint()
+        end
+    else
+        # Only when there are no additional threads, use the main thread to execute
+        try
+            # now start executing tasks of the pending result in a loop
+            success = pending_execute_tasks(pending)
+        catch ex
+            cleanup_tasks(tasks, task_state)
+            throw(ex)
+        end
     end
-    cleanup_tasks(tasks)
+
+    # we finished execution of all tasks, cleanup the tasks
+    cleanup_tasks(tasks, task_state)
+
+    # check if an error was thrown
+    if !success
+        throw(QueryException(get_error(stmt, pending)))
+    end
+    handle = Ref{duckdb_result}()
+    ret = duckdb_execute_pending(pending.handle, handle)
     if ret != DuckDBSuccess
         error_ptr = duckdb_result_error(handle)
-        if error_ptr == C_NULL
-            error_message = string("Execute of query \"", stmt.sql, "\" failed: unknown error")
-        else
-            error_message = string("Execute of query \"", stmt.sql, "\" failed: ", unsafe_string(error_ptr))
-        end
+        error_message = fetch_error(stmt, error_ptr)
         duckdb_destroy_result(handle)
         throw(QueryException(error_message))
     end

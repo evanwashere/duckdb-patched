@@ -1,4 +1,4 @@
-#include "duckdb/main/capi_internal.hpp"
+#include "duckdb/main/capi/capi_internal.hpp"
 
 using duckdb::Appender;
 using duckdb::AppenderWrapper;
@@ -95,6 +95,9 @@ duckdb_state duckdb_append_internal(duckdb_appender appender, T value) {
 	auto *appender_instance = (AppenderWrapper *)appender;
 	try {
 		appender_instance->appender->Append<T>(value);
+	} catch (std::exception &ex) {
+		appender_instance->error = ex.what();
+		return DuckDBError;
 	} catch (...) {
 		return DuckDBError;
 	}

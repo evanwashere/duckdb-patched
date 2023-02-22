@@ -4,8 +4,10 @@
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/view_catalog_entry.hpp"
 #include "duckdb/parser/qualified_name.hpp"
-#include "duckdb/planner/constraints/bound_not_null_constraint.hpp"
-#include "duckdb/planner/constraints/bound_unique_constraint.hpp"
+#include "duckdb/parser/constraints/not_null_constraint.hpp"
+#include "duckdb/parser/constraints/unique_constraint.hpp"
+#include "duckdb/planner/expression/bound_parameter_expression.hpp"
+#include "duckdb/planner/binder.hpp"
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/limits.hpp"
@@ -29,6 +31,7 @@ struct PragmaTableOperatorData : public GlobalTableFunctionState {
 
 static unique_ptr<FunctionData> PragmaTableInfoBind(ClientContext &context, TableFunctionBindInput &input,
                                                     vector<LogicalType> &return_types, vector<string> &names) {
+
 	names.emplace_back("cid");
 	return_types.emplace_back(LogicalType::INTEGER);
 
@@ -50,8 +53,8 @@ static unique_ptr<FunctionData> PragmaTableInfoBind(ClientContext &context, Tabl
 	auto qname = QualifiedName::Parse(input.inputs[0].GetValue<string>());
 
 	// look up the table name in the catalog
-	auto &catalog = Catalog::GetCatalog(context);
-	auto entry = catalog.GetEntry(context, CatalogType::TABLE_ENTRY, qname.schema, qname.name);
+	Binder::BindSchemaOrCatalog(context, qname.catalog, qname.schema);
+	auto entry = Catalog::GetEntry(context, CatalogType::TABLE_ENTRY, qname.catalog, qname.schema, qname.name);
 	return make_unique<PragmaTableFunctionData>(entry);
 }
 
@@ -59,24 +62,31 @@ unique_ptr<GlobalTableFunctionState> PragmaTableInfoInit(ClientContext &context,
 	return make_unique<PragmaTableOperatorData>();
 }
 
-static void CheckConstraints(TableCatalogEntry *table, idx_t oid, bool &out_not_null, bool &out_pk) {
+static void CheckConstraints(TableCatalogEntry *table, const ColumnDefinition &column, bool &out_not_null,
+                             bool &out_pk) {
 	out_not_null = false;
 	out_pk = false;
 	// check all constraints
 	// FIXME: this is pretty inefficient, it probably doesn't matter
-	for (auto &constraint : table->bound_constraints) {
+	for (auto &constraint : table->GetConstraints()) {
 		switch (constraint->type) {
 		case ConstraintType::NOT_NULL: {
-			auto &not_null = (BoundNotNullConstraint &)*constraint;
-			if (not_null.index == oid) {
+			auto &not_null = (NotNullConstraint &)*constraint;
+			if (not_null.index == column.Logical()) {
 				out_not_null = true;
 			}
 			break;
 		}
 		case ConstraintType::UNIQUE: {
-			auto &unique = (BoundUniqueConstraint &)*constraint;
-			if (unique.is_primary_key && unique.key_set.find(oid) != unique.key_set.end()) {
-				out_pk = true;
+			auto &unique = (UniqueConstraint &)*constraint;
+
+			if (unique.is_primary_key) {
+				if (unique.index == column.Logical()) {
+					out_pk = true;
+				}
+				if (std::find(unique.columns.begin(), unique.columns.end(), column.GetName()) != unique.columns.end()) {
+					out_pk = true;
+				}
 			}
 			break;
 		}
@@ -87,21 +97,21 @@ static void CheckConstraints(TableCatalogEntry *table, idx_t oid, bool &out_not_
 }
 
 static void PragmaTableInfoTable(PragmaTableOperatorData &data, TableCatalogEntry *table, DataChunk &output) {
-	if (data.offset >= table->columns.size()) {
+	if (data.offset >= table->GetColumns().LogicalColumnCount()) {
 		// finished returning values
 		return;
 	}
 	// start returning values
 	// either fill up the chunk or return all the remaining columns
-	idx_t next = MinValue<idx_t>(data.offset + STANDARD_VECTOR_SIZE, table->columns.size());
+	idx_t next = MinValue<idx_t>(data.offset + STANDARD_VECTOR_SIZE, table->GetColumns().LogicalColumnCount());
 	output.SetCardinality(next - data.offset);
 
 	for (idx_t i = data.offset; i < next; i++) {
 		bool not_null, pk;
 		auto index = i - data.offset;
-		auto &column = table->columns[i];
+		auto &column = table->GetColumn(LogicalIndex(i));
 		D_ASSERT(column.Oid() < (idx_t)NumericLimits<int32_t>::Maximum());
-		CheckConstraints(table, column.Oid(), not_null, pk);
+		CheckConstraints(table, column, not_null, pk);
 
 		// return values:
 		// "cid", PhysicalType::INT32
@@ -133,12 +143,12 @@ static void PragmaTableInfoView(PragmaTableOperatorData &data, ViewCatalogEntry 
 
 	for (idx_t i = data.offset; i < next; i++) {
 		auto index = i - data.offset;
-		auto type = view->types[index];
-		auto &name = view->aliases[index];
+		auto type = view->types[i];
+		auto &name = view->aliases[i];
 		// return values:
 		// "cid", PhysicalType::INT32
 
-		output.SetValue(0, index, Value::INTEGER((int32_t)index));
+		output.SetValue(0, index, Value::INTEGER((int32_t)i));
 		// "name", PhysicalType::VARCHAR
 		output.SetValue(1, index, Value(name));
 		// "type", PhysicalType::VARCHAR

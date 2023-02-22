@@ -1,5 +1,8 @@
 #define CATCH_CONFIG_MAIN
 #include "catch.hpp"
+#ifdef USE_DUCKDB_SHELL_WRAPPER
+#include "duckdb_shell_wrapper.h"
+#endif
 #include "sqlite3.h"
 #include <string>
 #include <thread>
@@ -148,7 +151,7 @@ TEST_CASE("Basic prepared statement usage", "[sqlite3wrapper]") {
 	REQUIRE(sqlite3_finalize(nullptr) == SQLITE_OK);
 
 	// first prepare the statement again
-	REQUIRE(stmt.Prepare(db.db, "SELECT * FROM test WHERE i=CAST($1 AS INTEGER)", -1, nullptr) == SQLITE_OK);
+	REQUIRE(stmt.Prepare(db.db, "SELECT CAST($1 AS INTEGER) FROM test", -1, nullptr) == SQLITE_OK);
 	// bind a non-integer here
 	REQUIRE(sqlite3_bind_text(stmt.stmt, 1, "hello", -1, nullptr) == SQLITE_OK);
 #ifndef SQLITE_TEST

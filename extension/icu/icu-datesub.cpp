@@ -135,8 +135,7 @@ struct ICUCalendarSub : public ICUDateFunc {
 
 	template <typename TA>
 	static ScalarFunction GetFunction(const LogicalTypeId &type) {
-		return ScalarFunction({LogicalType::VARCHAR, type, type}, LogicalType::BIGINT, ICUDateSubFunction<TA>, false,
-		                      false, Bind);
+		return ScalarFunction({LogicalType::VARCHAR, type, type}, LogicalType::BIGINT, ICUDateSubFunction<TA>, Bind);
 	}
 
 	static void AddFunctions(const string &name, ClientContext &context) {
@@ -144,7 +143,7 @@ struct ICUCalendarSub : public ICUDateFunc {
 		set.AddFunction(GetFunction<timestamp_t>(LogicalType::TIMESTAMP_TZ));
 
 		CreateScalarFunctionInfo func_info(set);
-		auto &catalog = Catalog::GetCatalog(context);
+		auto &catalog = Catalog::GetSystemCatalog(context);
 		catalog.AddFunction(context, &func_info);
 	}
 };
@@ -263,8 +262,7 @@ struct ICUCalendarDiff : public ICUDateFunc {
 
 	template <typename TA>
 	static ScalarFunction GetFunction(const LogicalTypeId &type) {
-		return ScalarFunction({LogicalType::VARCHAR, type, type}, LogicalType::BIGINT, ICUDateDiffFunction<TA>, false,
-		                      false, Bind);
+		return ScalarFunction({LogicalType::VARCHAR, type, type}, LogicalType::BIGINT, ICUDateDiffFunction<TA>, Bind);
 	}
 
 	static void AddFunctions(const string &name, ClientContext &context) {
@@ -272,7 +270,7 @@ struct ICUCalendarDiff : public ICUDateFunc {
 		set.AddFunction(GetFunction<timestamp_t>(LogicalType::TIMESTAMP_TZ));
 
 		CreateScalarFunctionInfo func_info(set);
-		auto &catalog = Catalog::GetCatalog(context);
+		auto &catalog = Catalog::GetSystemCatalog(context);
 		catalog.AddFunction(context, &func_info);
 	}
 };

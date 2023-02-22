@@ -137,8 +137,7 @@ struct ICUDateTrunc : public ICUDateFunc {
 
 	template <typename TA>
 	static ScalarFunction GetDateTruncFunction(const LogicalTypeId &type) {
-		return ScalarFunction({LogicalType::VARCHAR, type}, LogicalType::TIMESTAMP_TZ, ICUDateTruncFunction<TA>, false,
-		                      false, Bind);
+		return ScalarFunction({LogicalType::VARCHAR, type}, LogicalType::TIMESTAMP_TZ, ICUDateTruncFunction<TA>, Bind);
 	}
 
 	static void AddBinaryTimestampFunction(const string &name, ClientContext &context) {
@@ -146,7 +145,7 @@ struct ICUDateTrunc : public ICUDateFunc {
 		set.AddFunction(GetDateTruncFunction<timestamp_t>(LogicalType::TIMESTAMP_TZ));
 
 		CreateScalarFunctionInfo func_info(set);
-		auto &catalog = Catalog::GetCatalog(context);
+		auto &catalog = Catalog::GetSystemCatalog(context);
 		catalog.AddFunction(context, &func_info);
 	}
 };

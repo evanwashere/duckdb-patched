@@ -1,13 +1,22 @@
-#include "duckdb/execution/index/art/node16.hpp"
 #include "duckdb/execution/index/art/node48.hpp"
+
+#include "duckdb/execution/index/art/art.hpp"
+#include "duckdb/execution/index/art/node16.hpp"
 #include "duckdb/execution/index/art/node256.hpp"
 
 namespace duckdb {
 
-Node48::Node48(ART &art, size_t compression_length) : Node(art, NodeType::N48, compression_length) {
+Node48::Node48() : Node(NodeType::N48) {
 	for (idx_t i = 0; i < 256; i++) {
 		child_index[i] = Node::EMPTY_MARKER;
 	}
+}
+
+idx_t Node48::MemorySize(ART &art, const bool &recurse) {
+	if (recurse) {
+		return prefix.MemorySize() + sizeof(*this) + RecursiveMemorySize(art);
+	}
+	return prefix.MemorySize() + sizeof(*this);
 }
 
 idx_t Node48::GetChildPos(uint8_t k) {
@@ -19,7 +28,7 @@ idx_t Node48::GetChildPos(uint8_t k) {
 }
 
 idx_t Node48::GetChildGreaterEqual(uint8_t k, bool &equal) {
-	for (idx_t pos = k; pos < 256; pos++) {
+	for (idx_t pos = k; pos < Node256::GetSize(); pos++) {
 		if (child_index[pos] != Node::EMPTY_MARKER) {
 			if (pos == k) {
 				equal = true;
@@ -29,25 +38,11 @@ idx_t Node48::GetChildGreaterEqual(uint8_t k, bool &equal) {
 			return pos;
 		}
 	}
-	return Node::GetChildGreaterEqual(k, equal);
-}
-
-idx_t Node48::GetNextPos(idx_t pos) {
-	for (pos == DConstants::INVALID_INDEX ? pos = 0 : pos++; pos < 256; pos++) {
-		if (child_index[pos] != Node::EMPTY_MARKER) {
-			return pos;
-		}
-	}
-	return Node::GetNextPos(pos);
-}
-
-unique_ptr<Node> *Node48::GetChild(idx_t pos) {
-	D_ASSERT(child_index[pos] != Node::EMPTY_MARKER);
-	return &child[child_index[pos]];
+	return DConstants::INVALID_INDEX;
 }
 
 idx_t Node48::GetMin() {
-	for (idx_t i = 0; i < 256; i++) {
+	for (idx_t i = 0; i < Node256::GetSize(); i++) {
 		if (child_index[i] != Node::EMPTY_MARKER) {
 			return i;
 		}
@@ -55,55 +50,111 @@ idx_t Node48::GetMin() {
 	return DConstants::INVALID_INDEX;
 }
 
-void Node48::Insert(ART &art, unique_ptr<Node> &node, uint8_t key_byte, unique_ptr<Node> &child) {
-	Node48 *n = static_cast<Node48 *>(node.get());
+idx_t Node48::GetNextPos(idx_t pos) {
+	pos == DConstants::INVALID_INDEX ? pos = 0 : pos++;
+	for (; pos < Node256::GetSize(); pos++) {
+		if (child_index[pos] != Node::EMPTY_MARKER) {
+			return pos;
+		}
+	}
+	return Node::GetNextPos(pos);
+}
 
-	// Insert leaf into inner node
-	if (node->count < 48) {
-		// Insert element
+idx_t Node48::GetNextPosAndByte(idx_t pos, uint8_t &byte) {
+	pos == DConstants::INVALID_INDEX ? pos = 0 : pos++;
+	for (; pos < Node256::GetSize(); pos++) {
+		if (child_index[pos] != Node::EMPTY_MARKER) {
+			byte = uint8_t(pos);
+			return pos;
+		}
+	}
+	return Node::GetNextPos(pos);
+}
+
+Node *Node48::GetChild(ART &art, idx_t pos) {
+	D_ASSERT(child_index[pos] != Node::EMPTY_MARKER);
+	return children[child_index[pos]].Unswizzle(art);
+}
+
+void Node48::ReplaceChildPointer(idx_t pos, Node *node) {
+	children[child_index[pos]] = node;
+}
+
+bool Node48::ChildIsInMemory(idx_t pos) {
+	return children[child_index[pos]] && !children[child_index[pos]].IsSwizzled();
+}
+
+void Node48::InsertChild(ART &art, Node *&node, uint8_t key_byte, Node *new_child) {
+	auto n = (Node48 *)node;
+
+	// insert new child node into node
+	if (node->count < Node48::GetSize()) {
+		// still space, just insert the child
 		idx_t pos = n->count;
-		if (n->child[pos]) {
+		if (n->children[pos]) {
 			// find an empty position in the node list if the current position is occupied
 			pos = 0;
-			while (n->child[pos]) {
+			while (n->children[pos]) {
 				pos++;
 			}
 		}
-		n->child[pos] = move(child);
+		n->children[pos] = new_child;
 		n->child_index[key_byte] = pos;
 		n->count++;
+
 	} else {
-		// Grow to Node256
-		auto new_node = make_unique<Node256>(art, n->prefix_length);
-		for (idx_t i = 0; i < 256; i++) {
+		// node is full, grow to Node256
+		auto new_node = Node256::New();
+		art.IncreaseMemorySize(new_node->MemorySize(art, false));
+		new_node->count = n->count;
+		new_node->prefix = std::move(n->prefix);
+
+		for (idx_t i = 0; i < Node256::GetSize(); i++) {
 			if (n->child_index[i] != Node::EMPTY_MARKER) {
-				new_node->child[i] = move(n->child[n->child_index[i]]);
+				new_node->children[i] = n->children[n->child_index[i]];
+				n->children[n->child_index[i]] = nullptr;
 			}
 		}
-		new_node->count = n->count;
-		CopyPrefix(art, n, new_node.get());
-		node = move(new_node);
-		Node256::Insert(art, node, key_byte, child);
+
+		art.DecreaseMemorySize(node->MemorySize(art, false));
+		Node::Delete(node);
+		node = new_node;
+		Node256::InsertChild(art, node, key_byte, new_child);
 	}
 }
 
-void Node48::Erase(ART &art, unique_ptr<Node> &node, int pos) {
-	Node48 *n = static_cast<Node48 *>(node.get());
+void Node48::EraseChild(ART &art, Node *&node, idx_t pos) {
+	auto n = (Node48 *)(node);
 
-	n->child[n->child_index[pos]].reset();
+	// adjust the ART size
+	if (n->ChildIsInMemory(pos)) {
+		auto child = n->GetChild(art, pos);
+		art.DecreaseMemorySize(child->MemorySize(art, true));
+	}
+
+	// erase the child and decrease the count
+	n->children[n->child_index[pos]].Reset();
 	n->child_index[pos] = Node::EMPTY_MARKER;
 	n->count--;
-	if (node->count <= 12) {
-		auto new_node = make_unique<Node16>(art, n->prefix_length);
-		CopyPrefix(art, n, new_node.get());
-		for (idx_t i = 0; i < 256; i++) {
+
+	// shrink node to Node16
+	if (node->count < NODE_48_SHRINK_THRESHOLD) {
+
+		auto new_node = Node16::New();
+		art.IncreaseMemorySize(new_node->MemorySize(art, false));
+		new_node->prefix = std::move(n->prefix);
+
+		for (idx_t i = 0; i < Node256::GetSize(); i++) {
 			if (n->child_index[i] != Node::EMPTY_MARKER) {
 				new_node->key[new_node->count] = i;
-				new_node->child[new_node->count++] = move(n->child[n->child_index[i]]);
+				new_node->children[new_node->count++] = n->children[n->child_index[i]];
+				n->children[n->child_index[i]] = nullptr;
 			}
 		}
-		node = move(new_node);
+
+		art.DecreaseMemorySize(node->MemorySize(art, false));
+		Node::Delete(node);
+		node = new_node;
 	}
 }
-
 } // namespace duckdb

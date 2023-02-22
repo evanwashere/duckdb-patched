@@ -13,6 +13,8 @@
 #include "duckdb/common/winapi.hpp"
 
 namespace duckdb {
+class Allocator;
+class ClientContext;
 
 //!  A ChunkCollection represents a set of DataChunks that all have the same
 //!  types
@@ -24,10 +26,10 @@ namespace duckdb {
 */
 class ChunkCollection {
 public:
-	ChunkCollection() : count(0) {
-	}
+	explicit ChunkCollection(Allocator &allocator);
+	explicit ChunkCollection(ClientContext &context);
 
-	//! The amount of columns in the ChunkCollection
+	//! The types of columns in the ChunkCollection
 	DUCKDB_API vector<LogicalType> &Types() {
 		return types;
 	}
@@ -107,17 +109,10 @@ public:
 			return nullptr;
 		}
 
-		auto res = move(chunks[0]);
+		auto res = std::move(chunks[0]);
 		chunks.erase(chunks.begin() + 0);
 		return res;
 	}
-
-	DUCKDB_API void Sort(vector<OrderType> &desc, vector<OrderByNullType> &null_order, idx_t result[]);
-	//! Reorders the rows in the collection according to the given indices.
-	DUCKDB_API void Reorder(idx_t order[]);
-
-	//! Returns true if the ChunkCollections are equivalent
-	DUCKDB_API bool Equals(ChunkCollection &other);
 
 	//! Locates the chunk that belongs to the specific index
 	DUCKDB_API idx_t LocateChunk(idx_t index) {
@@ -126,7 +121,12 @@ public:
 		return result;
 	}
 
+	Allocator &GetAllocator() {
+		return allocator;
+	}
+
 private:
+	Allocator &allocator;
 	//! The total amount of elements in the collection
 	idx_t count;
 	//! The set of data chunks in the collection

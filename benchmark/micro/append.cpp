@@ -65,7 +65,7 @@ struct DuckDBPreparedState : public DuckDBBenchmarkState {
 #define APPEND_BENCHMARK_PREPARED(CREATE_STATEMENT)                                                                    \
 	unique_ptr<DuckDBBenchmarkState> CreateBenchmarkState() override {                                                 \
 		auto result = make_unique<DuckDBPreparedState>(GetDatabasePath());                                             \
-		return move(result);                                                                                           \
+		return std::move(result);                                                                                      \
 	}                                                                                                                  \
 	void Load(DuckDBBenchmarkState *state_p) override {                                                                \
 		auto state = (DuckDBPreparedState *)state_p;                                                                   \
@@ -210,8 +210,8 @@ string GetQuery() override {
 	return "COPY integers TO 'integers.csv' DELIMITER '|' HEADER";
 }
 string VerifyResult(QueryResult *result) override {
-	if (!result->success) {
-		return result->error;
+	if (result->HasError()) {
+		return result->GetError();
 	}
 	return string();
 }

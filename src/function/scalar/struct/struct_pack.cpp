@@ -54,7 +54,7 @@ static unique_ptr<FunctionData> StructPackBind(ClientContext &context, ScalarFun
 	}
 
 	// this is more for completeness reasons
-	bound_function.return_type = LogicalType::STRUCT(move(struct_children));
+	bound_function.return_type = LogicalType::STRUCT(std::move(struct_children));
 	return make_unique<VariableReturnBindData>(bound_function.return_type);
 }
 
@@ -66,14 +66,17 @@ unique_ptr<BaseStatistics> StructPackStats(ClientContext &context, FunctionStati
 	for (idx_t i = 0; i < struct_stats->child_stats.size(); i++) {
 		struct_stats->child_stats[i] = child_stats[i] ? child_stats[i]->Copy() : nullptr;
 	}
-	return move(struct_stats);
+	return std::move(struct_stats);
 }
 
 void StructPackFun::RegisterFunction(BuiltinFunctions &set) {
 	// the arguments and return types are actually set in the binder function
-	ScalarFunction fun("struct_pack", {}, LogicalTypeId::STRUCT, StructPackFunction, false, StructPackBind, nullptr,
+	ScalarFunction fun("struct_pack", {}, LogicalTypeId::STRUCT, StructPackFunction, StructPackBind, nullptr,
 	                   StructPackStats);
 	fun.varargs = LogicalType::ANY;
+	fun.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+	fun.serialize = VariableReturnBindData::Serialize;
+	fun.deserialize = VariableReturnBindData::Deserialize;
 	set.AddFunction(fun);
 	fun.name = "row";
 	set.AddFunction(fun);

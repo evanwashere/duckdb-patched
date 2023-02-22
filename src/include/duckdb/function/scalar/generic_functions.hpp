@@ -10,6 +10,7 @@
 
 #include "duckdb/function/scalar_function.hpp"
 #include "duckdb/function/function_set.hpp"
+#include "duckdb/function/built_in_functions.hpp"
 
 namespace duckdb {
 class BoundFunctionExpression;
@@ -39,9 +40,10 @@ struct TypeOfFun {
 };
 
 struct ConstantOrNull {
-	static ScalarFunction GetFunction(LogicalType return_type);
+	static ScalarFunction GetFunction(const LogicalType &return_type);
 	static unique_ptr<FunctionData> Bind(Value value);
 	static bool IsConstantOrNull(BoundFunctionExpression &expr, const Value &val);
+	static void RegisterFunction(BuiltinFunctions &set);
 };
 
 struct CurrentSettingFun {

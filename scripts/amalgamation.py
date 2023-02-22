@@ -16,28 +16,14 @@ skip_duckdb_includes = False
 
 src_dir = 'src'
 include_dir = os.path.join('src', 'include')
-fmt_dir = os.path.join('third_party', 'fmt')
-fmt_include_dir = os.path.join('third_party', 'fmt', 'include')
-miniz_dir = os.path.join('third_party', 'miniz')
-re2_dir = os.path.join('third_party', 're2')
-pg_query_dir = os.path.join('third_party', 'libpg_query')
-pg_query_include_dir = os.path.join('third_party', 'libpg_query', 'include')
-hll_dir = os.path.join('third_party', 'hyperloglog')
-fastpforlib_dir = os.path.join('third_party', 'fastpforlib')
-tdigest_dir = os.path.join('third_party', 'tdigest')
-utf8proc_dir = os.path.join('third_party', 'utf8proc')
-utf8proc_include_dir = os.path.join('third_party', 'utf8proc', 'include')
-httplib_include_dir = os.path.join('third_party', 'httplib')
-fastfloat_include_dir = os.path.join('third_party', 'fast_float')
-
-moodycamel_include_dir = os.path.join('third_party', 'concurrentqueue')
-pcg_include_dir = os.path.join('third_party', 'pcg')
 
 # files included in the amalgamated "duckdb.hpp" file
 main_header_files = [os.path.join(include_dir, 'duckdb.hpp'),
     os.path.join(include_dir, 'duckdb.h'),
     os.path.join(include_dir, 'duckdb', 'common', 'types', 'date.hpp'),
-    os.path.join(include_dir, 'duckdb', 'common', 'arrow.hpp'),
+    os.path.join(include_dir, 'duckdb', 'common', 'arrow', 'arrow.hpp'),
+    os.path.join(include_dir, 'duckdb', 'common', 'arrow', 'arrow_converter.hpp'),
+    os.path.join(include_dir, 'duckdb', 'common', 'arrow', 'arrow_wrapper.hpp'),
     os.path.join(include_dir, 'duckdb', 'common', 'types', 'blob.hpp'),
     os.path.join(include_dir, 'duckdb', 'common', 'types', 'decimal.hpp'),
     os.path.join(include_dir, 'duckdb', 'common', 'types', 'hugeint.hpp'),
@@ -79,18 +65,23 @@ if '--extended' in sys.argv:
         "duckdb/planner/filter/constant_filter.hpp",
         "duckdb/execution/operator/persistent/buffered_csv_reader.hpp",
         "duckdb/common/types/vector_cache.hpp",
+        "duckdb/common/string_map_set.hpp",
         "duckdb/planner/filter/null_filter.hpp",
-        "duckdb/common/arrow_wrapper.hpp",
+        "duckdb/common/arrow/arrow_wrapper.hpp",
+        "duckdb/common/hive_partitioning.hpp",
+        "duckdb/common/union_by_name.hpp",
+        "duckdb/planner/operator/logical_get.hpp",
         "duckdb/common/compressed_file_system.hpp"]]
     main_header_files += add_include_dir(os.path.join(include_dir, 'duckdb/parser/expression'))
     main_header_files += add_include_dir(os.path.join(include_dir, 'duckdb/parser/parsed_data'))
     main_header_files += add_include_dir(os.path.join(include_dir, 'duckdb/parser/tableref'))
     main_header_files = normalize_path(main_header_files)
 
+import package_build
 # include paths for where to search for include files during amalgamation
-include_paths = [include_dir, fmt_include_dir, re2_dir, miniz_dir, utf8proc_include_dir, hll_dir, fastpforlib_dir, tdigest_dir, utf8proc_dir, pg_query_include_dir, pg_query_dir, moodycamel_include_dir, pcg_include_dir, httplib_include_dir, fastfloat_include_dir]
+include_paths = [include_dir] + package_build.third_party_includes()
 # paths of where to look for files to compile and include to the final amalgamation
-compile_directories = [src_dir, fmt_dir, miniz_dir, re2_dir, hll_dir, fastpforlib_dir, utf8proc_dir, pg_query_dir]
+compile_directories = [src_dir] + package_build.third_party_sources()
 
 # files always excluded
 always_excluded = normalize_path(['src/amalgamation/duckdb.cpp', 'src/amalgamation/duckdb.hpp', 'src/amalgamation/parquet-amalgamation.cpp', 'src/amalgamation/parquet-amalgamation.hpp'])
@@ -111,8 +102,12 @@ def get_includes(fpath, text):
         included_file = x[1]
         if skip_duckdb_includes and 'duckdb' in included_file:
             continue
-        if 'extension_helper.cpp' in fpath and included_file.endswith('-extension.hpp'):
+        if 'extension_helper.cpp' in fpath and (included_file.endswith('-extension.hpp') or included_file == 'extension_oote_loader.hpp'):
             continue
+        if 'allocator.cpp' in fpath and included_file.endswith('jemalloc-extension.hpp'):
+            continue
+        if x[0] in include_statements:
+            raise Exception(f"duplicate include {x[0]} in file {fpath}")
         include_statements.append(x[0])
         included_file = os.sep.join(included_file.split('/'))
         found = False
@@ -238,17 +233,20 @@ def git_commit_hash():
     return subprocess.check_output(['git','log','-1','--format=%h']).strip().decode('utf8')
 
 def git_dev_version():
-    version = subprocess.check_output(['git','describe','--tags','--abbrev=0']).strip().decode('utf8')
-    long_version = subprocess.check_output(['git','describe','--tags','--long']).strip().decode('utf8')
-    version_splits = version.split('.')
-    dev_version = long_version.split('-')[1]
-    if int(dev_version) == 0:
-        # directly on a tag: emit the regular version
-        return '.'.join(version_splits)
-    else:
-        # not on a tag: increment the version by one and add a -devX suffix
-        version_splits[2] = str(int(version_splits[2]) + 1)
-        return '.'.join(version_splits) + "-dev" + dev_version
+    try:
+        version = subprocess.check_output(['git','describe','--tags','--abbrev=0']).strip().decode('utf8')
+        long_version = subprocess.check_output(['git','describe','--tags','--long']).strip().decode('utf8')
+        version_splits = version.split('.')
+        dev_version = long_version.split('-')[1]
+        if int(dev_version) == 0:
+            # directly on a tag: emit the regular version
+            return '.'.join(version_splits)
+        else:
+            # not on a tag: increment the version by one and add a -devX suffix
+            version_splits[2] = str(int(version_splits[2]) + 1)
+            return '.'.join(version_splits) + "-dev" + dev_version
+    except:
+        return "0.0.0"
 
 def generate_duckdb_hpp(header_file):
     print("-----------------------")

@@ -23,13 +23,14 @@
 
 namespace duckdb {
 
-class ChunkCollection;
+class ColumnDataCollection;
 class ClientContext;
 
 class DatabaseInstance;
 class DuckDB;
 class LogicalOperator;
 class SelectStatement;
+struct BufferedCSVReaderOptions;
 
 typedef void (*warning_callback)(std::string);
 
@@ -106,8 +107,8 @@ public:
 
 	//! Appends a DataChunk to the specified table
 	DUCKDB_API void Append(TableDescription &description, DataChunk &chunk);
-	//! Appends a ChunkCollection to the specified table
-	DUCKDB_API void Append(TableDescription &description, ChunkCollection &collection);
+	//! Appends a ColumnDataCollection to the specified table
+	DUCKDB_API void Append(TableDescription &description, ColumnDataCollection &collection);
 
 	//! Returns a relation that produces a table from this connection
 	DUCKDB_API shared_ptr<Relation> Table(const string &tname);
@@ -127,20 +128,34 @@ public:
 	DUCKDB_API shared_ptr<Relation> Values(const string &values);
 	DUCKDB_API shared_ptr<Relation> Values(const string &values, const vector<string> &column_names,
 	                                       const string &alias = "values");
+
 	//! Reads CSV file
 	DUCKDB_API shared_ptr<Relation> ReadCSV(const string &csv_file);
+	DUCKDB_API shared_ptr<Relation> ReadCSV(const string &csv_file, BufferedCSVReaderOptions &options);
 	DUCKDB_API shared_ptr<Relation> ReadCSV(const string &csv_file, const vector<string> &columns);
+
+	//! Reads Parquet file
+	DUCKDB_API shared_ptr<Relation> ReadParquet(const string &parquet_file, bool binary_as_string);
 	//! Returns a relation from a query
 	DUCKDB_API shared_ptr<Relation> RelationFromQuery(const string &query, const string &alias = "queryrelation",
 	                                                  const string &error = "Expected a single SELECT statement");
 	DUCKDB_API shared_ptr<Relation> RelationFromQuery(unique_ptr<SelectStatement> select_stmt,
 	                                                  const string &alias = "queryrelation");
 
+	//! Returns a substrait BLOB from a valid query
+	DUCKDB_API string GetSubstrait(const string &query);
+	//! Returns a Query Result from a substrait blob
+	DUCKDB_API unique_ptr<QueryResult> FromSubstrait(const string &proto);
+	//! Returns a substrait BLOB from a valid query
+	DUCKDB_API string GetSubstraitJSON(const string &query);
+	//! Returns a Query Result from a substrait JSON
+	DUCKDB_API unique_ptr<QueryResult> FromSubstraitJSON(const string &json);
 	DUCKDB_API void BeginTransaction();
 	DUCKDB_API void Commit();
 	DUCKDB_API void Rollback();
 	DUCKDB_API void SetAutoCommit(bool auto_commit);
 	DUCKDB_API bool IsAutoCommit();
+	DUCKDB_API bool HasActiveTransaction();
 
 	//! Fetch a list of table names that are required for a given query
 	DUCKDB_API unordered_set<string> GetTableNames(const string &query);
@@ -155,19 +170,20 @@ public:
 	void CreateScalarFunction(const string &name, vector<LogicalType> args, LogicalType ret_type,
 	                          TR (*udf_func)(Args...)) {
 		scalar_function_t function =
-		    UDFWrapper::CreateScalarFunction<TR, Args...>(name, args, move(ret_type), udf_func);
+		    UDFWrapper::CreateScalarFunction<TR, Args...>(name, args, std::move(ret_type), udf_func);
 		UDFWrapper::RegisterFunction(name, args, ret_type, function, *context);
 	}
 
 	template <typename TR, typename... Args>
 	void CreateVectorizedFunction(const string &name, scalar_function_t udf_func,
 	                              LogicalType varargs = LogicalType::INVALID) {
-		UDFWrapper::RegisterFunction<TR, Args...>(name, udf_func, *context, move(varargs));
+		UDFWrapper::RegisterFunction<TR, Args...>(name, udf_func, *context, std::move(varargs));
 	}
 
 	DUCKDB_API void CreateVectorizedFunction(const string &name, vector<LogicalType> args, LogicalType ret_type,
 	                                         scalar_function_t udf_func, LogicalType varargs = LogicalType::INVALID) {
-		UDFWrapper::RegisterFunction(name, move(args), move(ret_type), udf_func, *context, move(varargs));
+		UDFWrapper::RegisterFunction(name, std::move(args), std::move(ret_type), udf_func, *context,
+		                             std::move(varargs));
 	}
 
 	//------------------------------------- Aggreate Functions ----------------------------------------//

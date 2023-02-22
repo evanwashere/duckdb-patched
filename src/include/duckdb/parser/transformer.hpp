@@ -17,6 +17,7 @@
 #include "duckdb/parser/parsed_data/create_info.hpp"
 #include "duckdb/parser/group_by_node.hpp"
 #include "duckdb/parser/query_node.hpp"
+#include "duckdb/common/case_insensitive_map.hpp"
 
 #include "pg_definitions.hpp"
 #include "nodes/parsenodes.hpp"
@@ -29,6 +30,8 @@ struct OrderByNode;
 struct CopyInfo;
 struct CommonTableExpressionInfo;
 struct GroupingExpressionMap;
+class OnConflictInfo;
+class UpdateSetInfo;
 
 //! The transformer class is responsible for transforming the internal Postgres
 //! parser representation into the DuckDB representation
@@ -52,6 +55,8 @@ private:
 	idx_t max_expression_depth;
 	//! The current prepared statement parameter index
 	idx_t prepared_statement_parameter_index = 0;
+	//! Map from named parameter to parameter index;
+	case_insensitive_map_t<idx_t> named_param_map;
 	//! Holds window expressions defined by name. We need those when transforming the expressions referring to them.
 	unordered_map<string, duckdb_libpgquery::PGWindowDef *> window_clauses;
 
@@ -61,6 +66,29 @@ private:
 		} else {
 			this->prepared_statement_parameter_index = new_count;
 		}
+	}
+	void SetNamedParam(const string &name, int32_t index) {
+		if (parent) {
+			parent->SetNamedParam(name, index);
+		} else {
+			D_ASSERT(!named_param_map.count(name));
+			this->named_param_map[name] = index;
+		}
+	}
+	bool GetNamedParam(const string &name, int32_t &index) {
+		if (parent) {
+			return parent->GetNamedParam(name, index);
+		} else {
+			auto entry = named_param_map.find(name);
+			if (entry == named_param_map.end()) {
+				return false;
+			}
+			index = entry->second;
+			return true;
+		}
+	}
+	bool HasNamedParameters() const {
+		return parent ? parent->HasNamedParameters() : !named_param_map.empty();
 	}
 
 private:
@@ -93,12 +121,21 @@ private:
 	unique_ptr<CreateStatement> TransformCreateFunction(duckdb_libpgquery::PGNode *node);
 	//! Transform a Postgres duckdb_libpgquery::T_PGCreateTypeStmt node into CreateStatement
 	unique_ptr<CreateStatement> TransformCreateType(duckdb_libpgquery::PGNode *node);
+	//! Transform a Postgres duckdb_libpgquery::T_PGCreateDatabaseStmt node into a CreateStatement
+	unique_ptr<CreateStatement> TransformCreateDatabase(duckdb_libpgquery::PGNode *node);
 	//! Transform a Postgres duckdb_libpgquery::T_PGAlterSeqStmt node into CreateStatement
 	unique_ptr<AlterStatement> TransformAlterSequence(duckdb_libpgquery::PGNode *node);
 	//! Transform a Postgres duckdb_libpgquery::T_PGDropStmt node into a Drop[Table,Schema]Statement
 	unique_ptr<SQLStatement> TransformDrop(duckdb_libpgquery::PGNode *node);
 	//! Transform a Postgres duckdb_libpgquery::T_PGInsertStmt node into a InsertStatement
 	unique_ptr<InsertStatement> TransformInsert(duckdb_libpgquery::PGNode *node);
+
+	//! Transform a Postgres duckdb_libpgquery::T_PGOnConflictClause node into a OnConflictInfo
+	unique_ptr<OnConflictInfo> TransformOnConflictClause(duckdb_libpgquery::PGOnConflictClause *node,
+	                                                     const string &relname);
+	//! Transform a ON CONFLICT shorthand into a OnConflictInfo
+	unique_ptr<OnConflictInfo> DummyOnConflictClause(duckdb_libpgquery::PGOnConflictActionAlias type,
+	                                                 const string &relname);
 	//! Transform a Postgres duckdb_libpgquery::T_PGCopyStmt node into a CopyStatement
 	unique_ptr<CopyStatement> TransformCopy(duckdb_libpgquery::PGNode *node);
 	void TransformCopyOptions(CopyInfo &info, duckdb_libpgquery::PGList *options);
@@ -115,15 +152,25 @@ private:
 	//! Transform a Postgres duckdb_libpgquery::T_PGImportStmt node into a PragmaStatement
 	unique_ptr<PragmaStatement> TransformImport(duckdb_libpgquery::PGNode *node);
 	unique_ptr<ExplainStatement> TransformExplain(duckdb_libpgquery::PGNode *node);
-	unique_ptr<VacuumStatement> TransformVacuum(duckdb_libpgquery::PGNode *node);
+	unique_ptr<SQLStatement> TransformVacuum(duckdb_libpgquery::PGNode *node);
 	unique_ptr<SQLStatement> TransformShow(duckdb_libpgquery::PGNode *node);
 	unique_ptr<ShowStatement> TransformShowSelect(duckdb_libpgquery::PGNode *node);
+	unique_ptr<AttachStatement> TransformAttach(duckdb_libpgquery::PGNode *node);
+	unique_ptr<DetachStatement> TransformDetach(duckdb_libpgquery::PGNode *node);
+	unique_ptr<SetStatement> TransformUse(duckdb_libpgquery::PGNode *node);
 
 	unique_ptr<PrepareStatement> TransformPrepare(duckdb_libpgquery::PGNode *node);
 	unique_ptr<ExecuteStatement> TransformExecute(duckdb_libpgquery::PGNode *node);
 	unique_ptr<CallStatement> TransformCall(duckdb_libpgquery::PGNode *node);
 	unique_ptr<DropStatement> TransformDeallocate(duckdb_libpgquery::PGNode *node);
+
+	//===--------------------------------------------------------------------===//
+	// SetStatement Transform
+	//===--------------------------------------------------------------------===//
 	unique_ptr<SetStatement> TransformSet(duckdb_libpgquery::PGNode *node);
+	unique_ptr<SetStatement> TransformSetVariable(duckdb_libpgquery::PGVariableSetStmt *stmt);
+	unique_ptr<SetStatement> TransformResetVariable(duckdb_libpgquery::PGVariableSetStmt *stmt);
+
 	unique_ptr<SQLStatement> TransformCheckpoint(duckdb_libpgquery::PGNode *node);
 	unique_ptr<LoadStatement> TransformLoad(duckdb_libpgquery::PGNode *node);
 
@@ -150,6 +197,7 @@ private:
 	unique_ptr<ConstantExpression> TransformValue(duckdb_libpgquery::PGValue val);
 	//! Transform a Postgres operator into an Expression
 	unique_ptr<ParsedExpression> TransformAExpr(duckdb_libpgquery::PGAExpr *root);
+	unique_ptr<ParsedExpression> TransformAExprInternal(duckdb_libpgquery::PGAExpr *root);
 	//! Transform a Postgres abstract expression into an Expression
 	unique_ptr<ParsedExpression> TransformExpression(duckdb_libpgquery::PGNode *node);
 	//! Transform a Postgres function call into an Expression
@@ -182,6 +230,18 @@ private:
 
 	unique_ptr<Constraint> TransformConstraint(duckdb_libpgquery::PGListCell *cell, ColumnDefinition &column,
 	                                           idx_t index);
+
+	//===--------------------------------------------------------------------===//
+	// Update transform
+	//===--------------------------------------------------------------------===//
+	unique_ptr<UpdateSetInfo> TransformUpdateSetInfo(duckdb_libpgquery::PGList *target_list,
+	                                                 duckdb_libpgquery::PGNode *where_clause);
+
+	//===--------------------------------------------------------------------===//
+	// Index transform
+	//===--------------------------------------------------------------------===//
+	vector<unique_ptr<ParsedExpression>> TransformIndexParameters(duckdb_libpgquery::PGList *list,
+	                                                              const string &relation_name);
 
 	//===--------------------------------------------------------------------===//
 	// Collation transform

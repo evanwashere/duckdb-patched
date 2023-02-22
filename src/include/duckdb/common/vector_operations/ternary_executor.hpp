@@ -16,6 +16,14 @@
 
 namespace duckdb {
 
+template <class OP>
+struct TernaryStandardOperatorWrapper {
+	template <class FUN, class A_TYPE, class B_TYPE, class C_TYPE, class RESULT_TYPE>
+	static inline RESULT_TYPE Operation(FUN fun, A_TYPE a, B_TYPE b, C_TYPE c, ValidityMask &mask, idx_t idx) {
+		return OP::template Operation<A_TYPE, B_TYPE, C_TYPE, RESULT_TYPE>(a, b, c);
+	}
+};
+
 struct TernaryLambdaWrapper {
 	template <class FUN, class A_TYPE, class B_TYPE, class C_TYPE, class RESULT_TYPE>
 	static inline RESULT_TYPE Operation(FUN fun, A_TYPE a, B_TYPE b, C_TYPE c, ValidityMask &mask, idx_t idx) {
@@ -81,10 +89,10 @@ public:
 		} else {
 			result.SetVectorType(VectorType::FLAT_VECTOR);
 
-			VectorData adata, bdata, cdata;
-			a.Orrify(count, adata);
-			b.Orrify(count, bdata);
-			c.Orrify(count, cdata);
+			UnifiedVectorFormat adata, bdata, cdata;
+			a.ToUnifiedFormat(count, adata);
+			b.ToUnifiedFormat(count, bdata);
+			c.ToUnifiedFormat(count, cdata);
 
 			ExecuteLoop<A_TYPE, B_TYPE, C_TYPE, RESULT_TYPE, OPWRAPPER>(
 			    (A_TYPE *)adata.data, (B_TYPE *)bdata.data, (C_TYPE *)cdata.data,
@@ -97,6 +105,12 @@ public:
 	          class FUN = std::function<RESULT_TYPE(A_TYPE, B_TYPE, C_TYPE)>>
 	static void Execute(Vector &a, Vector &b, Vector &c, Vector &result, idx_t count, FUN fun) {
 		ExecuteGeneric<A_TYPE, B_TYPE, C_TYPE, RESULT_TYPE, TernaryLambdaWrapper, FUN>(a, b, c, result, count, fun);
+	}
+
+	template <class A_TYPE, class B_TYPE, class C_TYPE, class RESULT_TYPE, class OP>
+	static void ExecuteStandard(Vector &a, Vector &b, Vector &c, Vector &result, idx_t count) {
+		ExecuteGeneric<A_TYPE, B_TYPE, C_TYPE, RESULT_TYPE, TernaryStandardOperatorWrapper<OP>, bool>(a, b, c, result,
+		                                                                                              count, false);
 	}
 
 	template <class A_TYPE, class B_TYPE, class C_TYPE, class RESULT_TYPE,
@@ -139,9 +153,9 @@ private:
 	}
 
 	template <class A_TYPE, class B_TYPE, class C_TYPE, class OP, bool NO_NULL>
-	static inline idx_t SelectLoopSelSwitch(VectorData &adata, VectorData &bdata, VectorData &cdata,
-	                                        const SelectionVector *sel, idx_t count, SelectionVector *true_sel,
-	                                        SelectionVector *false_sel) {
+	static inline idx_t SelectLoopSelSwitch(UnifiedVectorFormat &adata, UnifiedVectorFormat &bdata,
+	                                        UnifiedVectorFormat &cdata, const SelectionVector *sel, idx_t count,
+	                                        SelectionVector *true_sel, SelectionVector *false_sel) {
 		if (true_sel && false_sel) {
 			return SelectLoop<A_TYPE, B_TYPE, C_TYPE, OP, NO_NULL, true, true>(
 			    (A_TYPE *)adata.data, (B_TYPE *)bdata.data, (C_TYPE *)cdata.data, sel, count, *adata.sel, *bdata.sel,
@@ -159,9 +173,9 @@ private:
 	}
 
 	template <class A_TYPE, class B_TYPE, class C_TYPE, class OP>
-	static inline idx_t SelectLoopSwitch(VectorData &adata, VectorData &bdata, VectorData &cdata,
-	                                     const SelectionVector *sel, idx_t count, SelectionVector *true_sel,
-	                                     SelectionVector *false_sel) {
+	static inline idx_t SelectLoopSwitch(UnifiedVectorFormat &adata, UnifiedVectorFormat &bdata,
+	                                     UnifiedVectorFormat &cdata, const SelectionVector *sel, idx_t count,
+	                                     SelectionVector *true_sel, SelectionVector *false_sel) {
 		if (!adata.validity.AllValid() || !bdata.validity.AllValid() || !cdata.validity.AllValid()) {
 			return SelectLoopSelSwitch<A_TYPE, B_TYPE, C_TYPE, OP, false>(adata, bdata, cdata, sel, count, true_sel,
 			                                                              false_sel);
@@ -178,10 +192,10 @@ public:
 		if (!sel) {
 			sel = FlatVector::IncrementalSelectionVector();
 		}
-		VectorData adata, bdata, cdata;
-		a.Orrify(count, adata);
-		b.Orrify(count, bdata);
-		c.Orrify(count, cdata);
+		UnifiedVectorFormat adata, bdata, cdata;
+		a.ToUnifiedFormat(count, adata);
+		b.ToUnifiedFormat(count, bdata);
+		c.ToUnifiedFormat(count, cdata);
 
 		return SelectLoopSwitch<A_TYPE, B_TYPE, C_TYPE, OP>(adata, bdata, cdata, sel, count, true_sel, false_sel);
 	}

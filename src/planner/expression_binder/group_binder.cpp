@@ -22,6 +22,8 @@ BindResult GroupBinder::BindExpression(unique_ptr<ParsedExpression> *expr_ptr, i
 			return BindColumnRef((ColumnRefExpression &)expr);
 		case ExpressionClass::CONSTANT:
 			return BindConstant((ConstantExpression &)expr);
+		case ExpressionClass::PARAMETER:
+			throw ParameterNotAllowedException("Parameter not supported in GROUP BY clause");
 		default:
 			break;
 		}
@@ -55,14 +57,14 @@ BindResult GroupBinder::BindSelectRef(idx_t entry) {
 	// we replace the root expression, also replace the unbound expression
 	unbound_expression = node.select_list[entry]->Copy();
 	// move the expression that this refers to here and bind it
-	auto select_entry = move(node.select_list[entry]);
+	auto select_entry = std::move(node.select_list[entry]);
 	auto binding = Bind(select_entry, nullptr, false);
 	// now replace the original expression in the select list with a reference to this group
 	group_alias_map[to_string(entry)] = bind_index;
 	node.select_list[entry] = make_unique<ColumnRefExpression>(to_string(entry));
 	// insert into the set of used aliases
 	used_aliases.insert(entry);
-	return BindResult(move(binding));
+	return BindResult(std::move(binding));
 }
 
 BindResult GroupBinder::BindConstant(ConstantExpression &constant) {

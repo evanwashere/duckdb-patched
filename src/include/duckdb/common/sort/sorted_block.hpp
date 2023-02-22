@@ -7,7 +7,11 @@
 //===----------------------------------------------------------------------===//
 #pragma once
 
+#include "duckdb/common/fast_mem.hpp"
+#include "duckdb/common/sort/comparators.hpp"
+#include "duckdb/common/types/row_data_collection_scanner.hpp"
 #include "duckdb/common/types/row_layout.hpp"
+#include "duckdb/storage/buffer/buffer_handle.hpp"
 
 namespace duckdb {
 
@@ -36,8 +40,8 @@ public:
 	//! Layout of this data
 	const RowLayout layout;
 	//! Data and heap blocks
-	vector<RowDataBlock> data_blocks;
-	vector<RowDataBlock> heap_blocks;
+	vector<unique_ptr<RowDataBlock>> data_blocks;
+	vector<unique_ptr<RowDataBlock>> heap_blocks;
 	//! Whether the pointers in this sorted data are swizzled
 	bool swizzled;
 
@@ -73,7 +77,7 @@ public:
 
 public:
 	//! Radix/memcmp sortable data
-	vector<RowDataBlock> radix_sorting_data;
+	vector<unique_ptr<RowDataBlock>> radix_sorting_data;
 	//! Variable sized sorting data
 	unique_ptr<SortedData> blob_sorting_data;
 	//! Payload data
@@ -114,13 +118,13 @@ public:
 	idx_t block_idx;
 	idx_t entry_idx;
 
-	unique_ptr<BufferHandle> radix_handle = nullptr;
+	BufferHandle radix_handle;
 
-	unique_ptr<BufferHandle> blob_sorting_data_handle = nullptr;
-	unique_ptr<BufferHandle> blob_sorting_heap_handle = nullptr;
+	BufferHandle blob_sorting_data_handle;
+	BufferHandle blob_sorting_heap_handle;
 
-	unique_ptr<BufferHandle> payload_data_handle = nullptr;
-	unique_ptr<BufferHandle> payload_heap_handle = nullptr;
+	BufferHandle payload_data_handle;
+	BufferHandle payload_heap_handle;
 };
 
 //! Used to scan the data into DataChunks after sorting
@@ -130,21 +134,21 @@ public:
 	explicit PayloadScanner(GlobalSortState &global_sort_state, bool flush = true);
 
 	//! Scan a single block
-	PayloadScanner(GlobalSortState &global_sort_state, idx_t block_idx);
+	PayloadScanner(GlobalSortState &global_sort_state, idx_t block_idx, bool flush = false);
 
 	//! The type layout of the payload
 	inline const vector<LogicalType> &GetPayloadTypes() const {
-		return sorted_data.layout.GetTypes();
+		return scanner->GetTypes();
 	}
 
 	//! The number of rows scanned so far
 	inline idx_t Scanned() const {
-		return total_scanned;
+		return scanner->Scanned();
 	}
 
 	//! The number of remaining rows
 	inline idx_t Remaining() const {
-		return total_count - total_scanned;
+		return scanner->Remaining();
 	}
 
 	//! Scans the next data chunk from the sorted data
@@ -152,19 +156,88 @@ public:
 
 private:
 	//! The sorted data being scanned
-	SortedData &sorted_data;
-	//! Read state
-	SBScanState read_state;
-	//! The total count of sorted_data
-	const idx_t total_count;
-	//! The global sort state
-	GlobalSortState &global_sort_state;
-	//! Addresses used to gather from the sorted data
-	Vector addresses = Vector(LogicalType::POINTER);
-	//! The number of rows scanned so far
-	idx_t total_scanned;
-	//! Whether to flush the blocks after scanning
-	const bool flush;
+	unique_ptr<RowDataCollection> rows;
+	unique_ptr<RowDataCollection> heap;
+	//! The actual scanner
+	unique_ptr<RowDataCollectionScanner> scanner;
+};
+
+struct SBIterator {
+	static int ComparisonValue(ExpressionType comparison);
+
+	SBIterator(GlobalSortState &gss, ExpressionType comparison, idx_t entry_idx_p = 0);
+
+	inline idx_t GetIndex() const {
+		return entry_idx;
+	}
+
+	inline void SetIndex(idx_t entry_idx_p) {
+		const auto new_block_idx = entry_idx_p / block_capacity;
+		if (new_block_idx != scan.block_idx) {
+			scan.SetIndices(new_block_idx, 0);
+			if (new_block_idx < block_count) {
+				scan.PinRadix(scan.block_idx);
+				block_ptr = scan.RadixPtr();
+				if (!all_constant) {
+					scan.PinData(*scan.sb->blob_sorting_data);
+				}
+			}
+		}
+
+		scan.entry_idx = entry_idx_p % block_capacity;
+		entry_ptr = block_ptr + scan.entry_idx * entry_size;
+		entry_idx = entry_idx_p;
+	}
+
+	inline SBIterator &operator++() {
+		if (++scan.entry_idx < block_capacity) {
+			entry_ptr += entry_size;
+			++entry_idx;
+		} else {
+			SetIndex(entry_idx + 1);
+		}
+
+		return *this;
+	}
+
+	inline SBIterator &operator--() {
+		if (scan.entry_idx) {
+			--scan.entry_idx;
+			--entry_idx;
+			entry_ptr -= entry_size;
+		} else {
+			SetIndex(entry_idx - 1);
+		}
+
+		return *this;
+	}
+
+	inline bool Compare(const SBIterator &other) const {
+		int comp_res;
+		if (all_constant) {
+			comp_res = FastMemcmp(entry_ptr, other.entry_ptr, cmp_size);
+		} else {
+			comp_res = Comparators::CompareTuple(scan, other.scan, entry_ptr, other.entry_ptr, sort_layout, external);
+		}
+
+		return comp_res <= cmp;
+	}
+
+	// Fixed comparison parameters
+	const SortLayout &sort_layout;
+	const idx_t block_count;
+	const idx_t block_capacity;
+	const size_t cmp_size;
+	const size_t entry_size;
+	const bool all_constant;
+	const bool external;
+	const int cmp;
+
+	// Iteration state
+	SBScanState scan;
+	idx_t entry_idx;
+	data_ptr_t block_ptr;
+	data_ptr_t entry_ptr;
 };
 
 } // namespace duckdb

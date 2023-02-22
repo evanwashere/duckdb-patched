@@ -16,10 +16,11 @@ import org.duckdb.DuckDBResultSet.DuckDBBlobResult;
 public class DuckDBResultSetMetaData implements ResultSetMetaData {
 
 	public DuckDBResultSetMetaData(int param_count, int column_count, String[] column_names,
-			String[] column_types_string, String[] column_types_details) {
+								   String[] column_types_string, String[] column_types_details, String return_type) {
 		this.param_count = param_count;
 		this.column_count = column_count;
 		this.column_names = column_names;
+		this.return_type = StatementReturnType.valueOf(return_type);
 		this.column_types_string = column_types_string;
 		this.column_types_details = column_types_details;
 		ArrayList<DuckDBColumnType> column_types_al = new ArrayList<DuckDBColumnType>(column_count);
@@ -47,6 +48,12 @@ public class DuckDBResultSetMetaData implements ResultSetMetaData {
 			return DuckDBColumnType.DECIMAL;
 		} else if (type_name.equals("TIMESTAMP WITH TIME ZONE")) {
 			return DuckDBColumnType.TIMESTAMP_WITH_TIME_ZONE;
+		} else if (type_name.endsWith("[]")) {
+			return DuckDBColumnType.LIST;
+		} else if (type_name.startsWith("STRUCT")) {
+			return DuckDBColumnType.STRUCT;
+		} else if (type_name.startsWith("MAP")) {
+			return DuckDBColumnType.MAP;
 		} else {
 			return DuckDBColumnType.valueOf(type_name);
 		}
@@ -59,6 +66,11 @@ public class DuckDBResultSetMetaData implements ResultSetMetaData {
 	protected String[] column_types_details;
 	protected DuckDBColumnType[] column_types;
 	protected DuckDBColumnTypeMetaData[] column_types_meta;
+	protected final StatementReturnType return_type;
+
+	public StatementReturnType getReturnType() {
+		return return_type;
+	}
 
 	public int getColumnCount() throws SQLException {
 		return column_count;
@@ -87,15 +99,19 @@ public class DuckDBResultSetMetaData implements ResultSetMetaData {
 			return Types.INTEGER;
 		case BIGINT:
 			return Types.BIGINT;
+		case LIST:
+			return Types.ARRAY;
+		case ENUM:
 		case HUGEINT:
-			return Types.JAVA_OBJECT;
 		case UTINYINT:
-			return Types.JAVA_OBJECT;
 		case USMALLINT:
-			return Types.JAVA_OBJECT;
+		case STRUCT:
+		case UUID:
+		case JSON:
 		case UINTEGER:
-			return Types.JAVA_OBJECT;
 		case UBIGINT:
+		case INTERVAL:
+		case MAP:
 			return Types.JAVA_OBJECT;
 		case FLOAT:
 			return Types.FLOAT;
@@ -109,17 +125,17 @@ public class DuckDBResultSetMetaData implements ResultSetMetaData {
 			return Types.TIME;
 		case DATE:
 			return Types.DATE;
+		case TIMESTAMP_S:
+		case TIMESTAMP_MS:
 		case TIMESTAMP:
+		case TIMESTAMP_NS:
 			return Types.TIMESTAMP;
 		case TIMESTAMP_WITH_TIME_ZONE:
-			return Types.TIME_WITH_TIMEZONE;
-		case INTERVAL:
-			return Types.JAVA_OBJECT;
+			return Types.TIMESTAMP_WITH_TIMEZONE;
 		case BLOB:
 			return Types.BLOB;
-
 		default:
-			throw new SQLException("Unsupported type " + type.toString());
+			throw new SQLException("Unsupported type " + type);
 		}
 	}
 
@@ -154,7 +170,7 @@ public class DuckDBResultSetMetaData implements ResultSetMetaData {
 			return Date.class.toString();
 		case Types.TIMESTAMP:
 			return Timestamp.class.toString();
-		case Types.TIME_WITH_TIMEZONE:
+		case Types.TIMESTAMP_WITH_TIMEZONE:
 			return OffsetDateTime.class.toString();
 		case Types.BLOB:
 			return DuckDBBlobResult.class.toString();
@@ -213,7 +229,7 @@ public class DuckDBResultSetMetaData implements ResultSetMetaData {
 	}
 
 	public int getColumnDisplaySize(int column) throws SQLException {
-		throw new SQLFeatureNotSupportedException();
+		return 0; // most systems will fall back to getPrecision
 	}
 
 	public int getPrecision(int column) throws SQLException {
@@ -245,11 +261,11 @@ public class DuckDBResultSetMetaData implements ResultSetMetaData {
 	}
 
 	public <T> T unwrap(Class<T> iface) throws SQLException {
-		throw new SQLFeatureNotSupportedException();
+		throw new SQLFeatureNotSupportedException("unwrap");
 	}
 
 	public boolean isWrapperFor(Class<?> iface) throws SQLException {
-		throw new SQLFeatureNotSupportedException();
+		throw new SQLFeatureNotSupportedException("isWrapperFor");
 	}
 
 	private DuckDBColumnTypeMetaData typeMetadataForColumn(int columnIndex) throws SQLException {

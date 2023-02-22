@@ -17,13 +17,15 @@ set(ICU_EXTENSION_FILES
     icu-datesub.cpp
     icu-datetrunc.cpp
     icu-makedate.cpp
-    icu-strptime.cpp)
+    icu-strptime.cpp
+    icu-timebucket.cpp
+    icu-timezone.cpp)
 
 add_library(icu_extension STATIC ${ICU_EXTENSION_FILES})
 link_threads(icu_extension)
 disable_target_warnings(icu_extension)
-
-build_loadable_extension(icu ${ICU_EXTENSION_FILES})
+set(PARAMETERS "-no-warnings")
+build_loadable_extension(icu ${PARAMETERS} ${ICU_EXTENSION_FILES})
 install(
   TARGETS icu_extension
   EXPORT "${DUCKDB_EXPORT_SET}"

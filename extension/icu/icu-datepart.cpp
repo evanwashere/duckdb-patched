@@ -313,8 +313,8 @@ struct ICUDatePart : public ICUDateFunc {
 				}
 			}
 		} else {
-			VectorData rdata;
-			input.Orrify(count, rdata);
+			UnifiedVectorFormat rdata;
+			input.ToUnifiedFormat(count, rdata);
 
 			const auto &arg_valid = rdata.validity;
 			auto tdata = (const INPUT_TYPE *)rdata.data;
@@ -329,24 +329,24 @@ struct ICUDatePart : public ICUDateFunc {
 			for (idx_t i = 0; i < count; ++i) {
 				const auto idx = rdata.sel->get_index(i);
 				if (arg_valid.RowIsValid(idx)) {
-					res_valid.SetValid(idx);
+					res_valid.SetValid(i);
 					auto micros = SetTime(calendar, tdata[idx]);
 					const auto is_finite = Timestamp::IsFinite(tdata[idx]);
 					for (size_t col = 0; col < child_entries.size(); ++col) {
 						auto &child_entry = child_entries[col];
 						if (is_finite) {
-							FlatVector::Validity(*child_entry).SetValid(idx);
+							FlatVector::Validity(*child_entry).SetValid(i);
 							auto pdata = FlatVector::GetData<int64_t>(*child_entry);
 							auto adapter = info.adapters[col];
-							pdata[idx] = adapter(calendar, micros);
+							pdata[i] = adapter(calendar, micros);
 						} else {
-							FlatVector::Validity(*child_entry).SetInvalid(idx);
+							FlatVector::Validity(*child_entry).SetInvalid(i);
 						}
 					}
 				} else {
-					res_valid.SetInvalid(idx);
+					res_valid.SetInvalid(i);
 					for (auto &child_entry : child_entries) {
-						FlatVector::Validity(*child_entry).SetInvalid(idx);
+						FlatVector::Validity(*child_entry).SetInvalid(i);
 					}
 				}
 			}
@@ -376,6 +376,9 @@ struct ICUDatePart : public ICUDateFunc {
 		using adapters_t = data_t::adapters_t;
 
 		// collect names and deconflict, construct return type
+		if (arguments[0]->HasParameter()) {
+			throw ParameterNotResolvedException();
+		}
 		if (!arguments[0]->IsFoldable()) {
 			throw BinderException("%s can only take constant lists of part names", bound_function.name);
 		}
@@ -384,7 +387,7 @@ struct ICUDatePart : public ICUDateFunc {
 		child_list_t<LogicalType> struct_children;
 		adapters_t adapters;
 
-		Value parts_list = ExpressionExecutor::EvaluateScalar(*arguments[0]);
+		Value parts_list = ExpressionExecutor::EvaluateScalar(context, *arguments[0]);
 		if (parts_list.type().id() == LogicalTypeId::LIST) {
 			auto &list_children = ListValue::GetChildren(parts_list);
 			if (list_children.empty()) {
@@ -407,20 +410,29 @@ struct ICUDatePart : public ICUDateFunc {
 			throw BinderException("%s can only take constant lists of part names", bound_function.name);
 		}
 
-		arguments.erase(arguments.begin());
-		bound_function.arguments.erase(bound_function.arguments.begin());
-		bound_function.return_type = LogicalType::STRUCT(move(struct_children));
+		Function::EraseArgument(bound_function, arguments, 0);
+		bound_function.return_type = LogicalType::STRUCT(std::move(struct_children));
 		return make_unique<data_t>(context, adapters);
+	}
+
+	static void SerializeFunction(FieldWriter &writer, const FunctionData *bind_data_p,
+	                              const ScalarFunction &function) {
+		throw NotImplementedException("FIXME: serialize icu-datepart");
+	}
+
+	static unique_ptr<FunctionData> DeserializeFunction(ClientContext &context, FieldReader &reader,
+	                                                    ScalarFunction &bound_function) {
+		throw NotImplementedException("FIXME: serialize icu-datepart");
 	}
 
 	template <typename INPUT_TYPE, typename RESULT_TYPE>
 	static ScalarFunction GetUnaryPartCodeFunction(const LogicalType &temporal_type) {
 		return ScalarFunction({temporal_type}, LogicalType::BIGINT, UnaryTimestampFunction<INPUT_TYPE, RESULT_TYPE>,
-		                      false, false, BindDatePart);
+		                      BindDatePart);
 	}
 
 	static void AddUnaryPartCodeFunctions(const string &name, ClientContext &context) {
-		auto &catalog = Catalog::GetCatalog(context);
+		auto &catalog = Catalog::GetSystemCatalog(context);
 		ScalarFunctionSet set(name);
 		set.AddFunction(GetUnaryPartCodeFunction<timestamp_t, int64_t>(LogicalType::TIMESTAMP_TZ));
 		CreateScalarFunctionInfo func_info(set);
@@ -430,19 +442,21 @@ struct ICUDatePart : public ICUDateFunc {
 	template <typename INPUT_TYPE, typename RESULT_TYPE>
 	static ScalarFunction GetBinaryPartCodeFunction(const LogicalType &temporal_type) {
 		return ScalarFunction({LogicalType::VARCHAR, temporal_type}, LogicalType::BIGINT,
-		                      BinaryTimestampFunction<INPUT_TYPE, RESULT_TYPE>, false, false, BindDatePart);
+		                      BinaryTimestampFunction<INPUT_TYPE, RESULT_TYPE>, BindDatePart);
 	}
 
 	template <typename INPUT_TYPE>
 	static ScalarFunction GetStructFunction(const LogicalType &temporal_type) {
 		auto part_type = LogicalType::LIST(LogicalType::VARCHAR);
 		auto result_type = LogicalType::STRUCT({});
-		return ScalarFunction({part_type, temporal_type}, result_type, StructFunction<INPUT_TYPE>, false, false,
-		                      BindStruct);
+		ScalarFunction result({part_type, temporal_type}, result_type, StructFunction<INPUT_TYPE>, BindStruct);
+		result.serialize = SerializeFunction;
+		result.deserialize = DeserializeFunction;
+		return result;
 	}
 
 	static void AddDatePartFunctions(const string &name, ClientContext &context) {
-		auto &catalog = Catalog::GetCatalog(context);
+		auto &catalog = Catalog::GetSystemCatalog(context);
 		ScalarFunctionSet set(name);
 		set.AddFunction(GetBinaryPartCodeFunction<timestamp_t, int64_t>(LogicalType::TIMESTAMP_TZ));
 		set.AddFunction(GetStructFunction<timestamp_t>(LogicalType::TIMESTAMP_TZ));
@@ -458,11 +472,11 @@ struct ICUDatePart : public ICUDateFunc {
 
 	template <typename INPUT_TYPE>
 	static ScalarFunction GetLastDayFunction(const LogicalType &temporal_type) {
-		return ScalarFunction({temporal_type}, LogicalType::DATE, UnaryTimestampFunction<INPUT_TYPE, date_t>, false,
-		                      false, BindLastDate);
+		return ScalarFunction({temporal_type}, LogicalType::DATE, UnaryTimestampFunction<INPUT_TYPE, date_t>,
+		                      BindLastDate);
 	}
 	static void AddLastDayFunctions(const string &name, ClientContext &context) {
-		auto &catalog = Catalog::GetCatalog(context);
+		auto &catalog = Catalog::GetSystemCatalog(context);
 		ScalarFunctionSet set(name);
 		set.AddFunction(GetLastDayFunction<timestamp_t>(LogicalType::TIMESTAMP_TZ));
 		CreateScalarFunctionInfo func_info(set);

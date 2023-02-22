@@ -6,7 +6,8 @@ namespace duckdb {
 
 class ProjectionState : public OperatorState {
 public:
-	explicit ProjectionState(const vector<unique_ptr<Expression>> &expressions) : executor(expressions) {
+	explicit ProjectionState(ExecutionContext &context, const vector<unique_ptr<Expression>> &expressions)
+	    : executor(context.client, expressions) {
 	}
 
 	ExpressionExecutor executor;
@@ -19,8 +20,8 @@ public:
 
 PhysicalProjection::PhysicalProjection(vector<LogicalType> types, vector<unique_ptr<Expression>> select_list,
                                        idx_t estimated_cardinality)
-    : PhysicalOperator(PhysicalOperatorType::PROJECTION, move(types), estimated_cardinality),
-      select_list(move(select_list)) {
+    : PhysicalOperator(PhysicalOperatorType::PROJECTION, std::move(types), estimated_cardinality),
+      select_list(std::move(select_list)) {
 }
 
 OperatorResultType PhysicalProjection::Execute(ExecutionContext &context, DataChunk &input, DataChunk &chunk,
@@ -30,8 +31,8 @@ OperatorResultType PhysicalProjection::Execute(ExecutionContext &context, DataCh
 	return OperatorResultType::NEED_MORE_INPUT;
 }
 
-unique_ptr<OperatorState> PhysicalProjection::GetOperatorState(ClientContext &context) const {
-	return make_unique<ProjectionState>(select_list);
+unique_ptr<OperatorState> PhysicalProjection::GetOperatorState(ExecutionContext &context) const {
+	return make_unique<ProjectionState>(context, select_list);
 }
 
 string PhysicalProjection::ParamsToString() const {

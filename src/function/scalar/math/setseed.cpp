@@ -29,14 +29,14 @@ static void SetSeedFunction(DataChunk &args, ExpressionState &state, Vector &res
 	auto &func_expr = (BoundFunctionExpression &)state.expr;
 	auto &info = (SetseedBindData &)*func_expr.bind_info;
 	auto &input = args.data[0];
-	input.Normalify(args.size());
+	input.Flatten(args.size());
 
 	auto input_seeds = FlatVector::GetData<double>(input);
 	uint32_t half_max = NumericLimits<uint32_t>::Maximum() / 2;
 
 	auto &random_engine = RandomEngine::Get(info.context);
 	for (idx_t i = 0; i < args.size(); i++) {
-		if (input_seeds[i] < -1.0 || input_seeds[i] > 1.0) {
+		if (input_seeds[i] < -1.0 || input_seeds[i] > 1.0 || Value::IsNan(input_seeds[i])) {
 			throw Exception("SETSEED accepts seed values between -1.0 and 1.0, inclusive");
 		}
 		uint32_t norm_seed = (input_seeds[i] + 1.0) * half_max;
@@ -53,8 +53,9 @@ unique_ptr<FunctionData> SetSeedBind(ClientContext &context, ScalarFunction &bou
 }
 
 void SetseedFun::RegisterFunction(BuiltinFunctions &set) {
-	set.AddFunction(
-	    ScalarFunction("setseed", {LogicalType::DOUBLE}, LogicalType::SQLNULL, SetSeedFunction, true, SetSeedBind));
+	ScalarFunction setseed("setseed", {LogicalType::DOUBLE}, LogicalType::SQLNULL, SetSeedFunction, SetSeedBind);
+	setseed.side_effects = FunctionSideEffects::HAS_SIDE_EFFECTS;
+	set.AddFunction(setseed);
 }
 
 } // namespace duckdb

@@ -1,6 +1,7 @@
 #include "duckdb/main/extension_helper.hpp"
 #include "duckdb/common/gzip_file_system.hpp"
 #include "duckdb/common/types/uuid.hpp"
+#include "duckdb/common/string_util.hpp"
 
 #ifndef DISABLE_DUCKDB_REMOTE_INSTALL
 #include "httplib.hpp"
@@ -14,14 +15,36 @@ namespace duckdb {
 //===--------------------------------------------------------------------===//
 // Install Extension
 //===--------------------------------------------------------------------===//
-const vector<string> ExtensionHelper::PathComponents() {
-	return vector<string> {".duckdb", "extensions", DuckDB::SourceID(), DuckDB::Platform()};
+const string ExtensionHelper::NormalizeVersionTag(const string &version_tag) {
+	if (version_tag.length() > 0 && version_tag[0] != 'v') {
+		return "v" + version_tag;
+	}
+	return version_tag;
 }
 
-string ExtensionHelper::ExtensionDirectory(FileSystem &fs) {
-	string local_path = fs.GetHomeDirectory();
+bool ExtensionHelper::IsRelease(const string &version_tag) {
+	return !StringUtil::Contains(version_tag, "-dev");
+}
+
+const string ExtensionHelper::GetVersionDirectoryName() {
+	if (IsRelease(DuckDB::LibraryVersion())) {
+		return NormalizeVersionTag(DuckDB::LibraryVersion());
+	} else {
+		return DuckDB::SourceID();
+	}
+}
+
+const vector<string> ExtensionHelper::PathComponents() {
+	return vector<string> {".duckdb", "extensions", GetVersionDirectoryName(), DuckDB::Platform()};
+}
+
+string ExtensionHelper::ExtensionDirectory(ClientContext &context) {
+	auto &fs = FileSystem::GetFileSystem(context);
+	string local_path = fs.GetHomeDirectory(FileSystem::GetFileOpener(context));
 	if (!fs.DirectoryExists(local_path)) {
-		throw InternalException("Can't find the home directory at " + local_path);
+		throw IOException("Can't find the home directory at '%s'\nSpecify a home directory using the SET "
+		                  "home_directory='/path/to/dir' option.",
+		                  local_path);
 	}
 	auto path_components = PathComponents();
 	for (auto &path_ele : path_components) {
@@ -33,16 +56,35 @@ string ExtensionHelper::ExtensionDirectory(FileSystem &fs) {
 	return local_path;
 }
 
-void ExtensionHelper::InstallExtension(DatabaseInstance &db, const string &extension, bool force_install) {
-	auto &config = DBConfig::GetConfig(db);
-	if (!config.enable_external_access) {
+bool ExtensionHelper::CreateSuggestions(const string &extension_name, string &message) {
+	vector<string> candidates;
+	for (idx_t ext_count = ExtensionHelper::DefaultExtensionCount(), i = 0; i < ext_count; i++) {
+		candidates.emplace_back(ExtensionHelper::GetDefaultExtension(i).name);
+	}
+	for (idx_t ext_count = ExtensionHelper::ExtensionAliasCount(), i = 0; i < ext_count; i++) {
+		candidates.emplace_back(ExtensionHelper::GetExtensionAlias(i).alias);
+	}
+	auto closest_extensions = StringUtil::TopNLevenshtein(candidates, extension_name);
+	message = StringUtil::CandidatesMessage(closest_extensions, "Candidate extensions");
+	for (auto &closest : closest_extensions) {
+		if (closest == extension_name) {
+			message = "Extension \"" + extension_name + "\" is an existing extension.\n";
+			return true;
+		}
+	}
+	return false;
+}
+
+void ExtensionHelper::InstallExtension(ClientContext &context, const string &extension, bool force_install) {
+	auto &config = DBConfig::GetConfig(context);
+	if (!config.options.enable_external_access) {
 		throw PermissionException("Installing extensions is disabled through configuration");
 	}
-	auto &fs = FileSystem::GetFileSystem(db);
+	auto &fs = FileSystem::GetFileSystem(context);
 
-	string local_path = ExtensionDirectory(fs);
+	string local_path = ExtensionDirectory(context);
 
-	auto extension_name = fs.ExtractBaseName(extension);
+	auto extension_name = ApplyExtensionAlias(fs.ExtractBaseName(extension));
 
 	string local_extension_path = fs.JoinPath(local_path, extension_name + ".duckdb_extension");
 	if (fs.FileExists(local_extension_path) && !force_install) {
@@ -78,14 +120,19 @@ void ExtensionHelper::InstallExtension(DatabaseInstance &db, const string &exten
 #ifdef DISABLE_DUCKDB_REMOTE_INSTALL
 	throw BinderException("Remote extension installation is disabled through configuration");
 #else
-	string url_template = "http://extensions.duckdb.org/${REVISION}/${PLATFORM}/${NAME}.duckdb_extension.gz";
+
+	string default_endpoint = "http://extensions.duckdb.org";
+	string versioned_path = "/${REVISION}/${PLATFORM}/${NAME}.duckdb_extension.gz";
+	string &custom_endpoint = ClientConfig::GetConfig(context).custom_extension_repo;
+	string &endpoint = !custom_endpoint.empty() ? custom_endpoint : default_endpoint;
+	string url_template = endpoint + versioned_path;
 
 	if (is_http_url) {
 		url_template = extension;
 		extension_name = "";
 	}
 
-	auto url = StringUtil::Replace(url_template, "${REVISION}", DuckDB::SourceID());
+	auto url = StringUtil::Replace(url_template, "${REVISION}", GetVersionDirectoryName());
 	url = StringUtil::Replace(url, "${PLATFORM}", DuckDB::Platform());
 	url = StringUtil::Replace(url, "${NAME}", extension_name);
 
@@ -107,8 +154,16 @@ void ExtensionHelper::InstallExtension(DatabaseInstance &db, const string &exten
 	                                                                     DuckDB::SourceID(), DuckDB::Platform())}};
 
 	auto res = cli.Get(url_local_part.c_str(), headers);
+
 	if (!res || res->status != 200) {
-		throw IOException("Failed to download extension %s%s", url_base, url_local_part);
+		// create suggestions
+		string message;
+		auto exact_match = ExtensionHelper::CreateSuggestions(extension_name, message);
+		if (exact_match) {
+			message += "\nAre you using a development build? In this case, extensions might not (yet) be uploaded.";
+		}
+		throw IOException("Failed to download extension \"%s\" at URL \"%s%s\"\n%s", extension_name, url_base,
+		                  url_local_part, message);
 	}
 	auto decompressed_body = GZipFileSystem::UncompressGZIPString(res->body);
 	std::ofstream out(temp_path, std::ios::binary);

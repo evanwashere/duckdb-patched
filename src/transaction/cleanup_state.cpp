@@ -50,6 +50,7 @@ void CleanupState::CleanupUpdate(UpdateInfo *info) {
 
 void CleanupState::CleanupDelete(DeleteInfo *info) {
 	auto version_table = info->table;
+	D_ASSERT(version_table->info->cardinality >= info->count);
 	version_table->info->cardinality -= info->count;
 	if (version_table->info->indexes.Empty()) {
 		// this table has no indexes: no cleanup to be done
@@ -76,7 +77,10 @@ void CleanupState::Flush() {
 	Vector row_identifiers(LogicalType::ROW_TYPE, (data_ptr_t)row_numbers);
 
 	// delete the tuples from all the indexes
-	current_table->RemoveFromIndexes(row_identifiers, count);
+	try {
+		current_table->RemoveFromIndexes(row_identifiers, count);
+	} catch (...) {
+	}
 
 	count = 0;
 }

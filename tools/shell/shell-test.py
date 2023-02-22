@@ -18,23 +18,32 @@ def test_exception(command, input, stdout, stderr, errmsg):
      print(stderr)
      raise Exception(errmsg)
 
-def test(cmd, out=None, err=None, extra_commands=None, input_file=None):
+def test(cmd, out=None, err=None, extra_commands=None, input_file=None, output_file=None):
      command = [sys.argv[1], '--batch', '-init', '/dev/null']
      if extra_commands:
           command += extra_commands
+
      if input_file:
           command += [cmd]
-          res = subprocess.run(command, input=open(input_file, 'rb').read(), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+          input_data = open(input_file, 'rb').read()
      else:
-          res = subprocess.run(command, input=bytearray(cmd, 'utf8'), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-     stdout = res.stdout.decode('utf8').strip()
+          input_data = bytearray(cmd, 'utf8')
+     output_pipe = subprocess.PIPE
+     if output_file:
+          output_pipe = open(output_file, 'w+')
+
+     res = subprocess.run(command, input=input_data, stdout=output_pipe, stderr=subprocess.PIPE)
+     if output_file:
+          stdout = open(output_file, 'r').read()
+     else:
+          stdout = res.stdout.decode('utf8').strip()
      stderr = res.stderr.decode('utf8').strip()
 
      if out and out not in stdout:
           test_exception(command, cmd, stdout, stderr, 'out test failed')
 
      if err and err not in stderr:
-          test_exception(command, cmd, stdout, stderr, 'err test failed')
+          test_exception(command, cmd, stdout, stderr, f"err test failed, error does not contain: '{err}'")
 
      if not err and stderr != '':
           test_exception(command, cmd, stdout, stderr, 'got err test failed')
@@ -299,6 +308,10 @@ CREATE INDEX a_idx ON a(i);
 # this does not seem to output anything
 test('.sha3sum')
 
+test('''
+.mode jsonlines
+SELECT 42,43;
+''', out='{"42":42,"43":43}')
 
 test('''
 .mode csv
@@ -309,7 +322,7 @@ SELECT 42,43;
 test('''
 .timer on
 SELECT NULL;
-''', out="Run Time:")
+''', out="Run Time (s):")
 
 test('''
 .scanstats on
@@ -328,6 +341,11 @@ outstr = open(outfile,'rb').read()
 if b'42' not in outstr:
      raise Exception('.output test failed')
 
+# issue 6204
+test('''
+.output foo.txt
+select * from range(2049);
+''')
 
 outfile = tf()
 test('''
@@ -412,7 +430,7 @@ SELECT * FROM t1;
 duckdb_nonsense_db = 'duckdbtest_nonsensedb.db'
 with open(duckdb_nonsense_db, 'w+') as f:
      f.write('blablabla')
-test('', err='The file is not a valid DuckDB database file', extra_commands=[duckdb_nonsense_db])
+test('', err='not a valid DuckDB database file', extra_commands=[duckdb_nonsense_db])
 os.remove(duckdb_nonsense_db)
 
 # enable_profiling doesn't result in any output
@@ -436,6 +454,26 @@ SELECT "hello world", '\r\t\n\b\f\\' FROM "foo";
 test('.system echo 42', out="42")
 test('.shell echo 42', out="42")
 
+# query profiling that includes the optimizer
+test("""
+PRAGMA enable_profiling=query_tree_optimizer;
+SELECT 42;
+""", out="42", err="Optimizer")
+
+# detailed also includes optimizer
+test("""
+PRAGMA enable_profiling;
+PRAGMA profiling_mode=detailed;
+SELECT 42;
+""", out="42", err="Optimizer")
+
+# even in json output mode
+test("""
+PRAGMA enable_profiling=json;
+PRAGMA profiling_mode=detailed;
+SELECT 42;
+""", out="42", err="optimizer")
+
 # this fails because db_config is missing
 # test('''
 # .eqp full
@@ -452,7 +490,7 @@ test('.shell echo 42', out="42")
 
 
 
-test('.databases', out='main:')
+test('.databases', out='memory')
 
 # .dump test
 test('''
@@ -607,6 +645,301 @@ test('''
 SELECT lsmode(1) AS lsmode;
 ''', out='lsmode')
 
+
+# test auto-complete
+test("""
+CALL sql_auto_complete('SEL')
+""", out="SELECT"
+)
+
+test("""
+CREATE TABLE my_table(my_column INTEGER);
+SELECT * FROM sql_auto_complete('SELECT my_') LIMIT 1;
+""", out="my_column"
+)
+
+test("""
+CREATE TABLE my_table(my_column INTEGER);
+SELECT * FROM sql_auto_complete('SELECT my_column FROM my_') LIMIT 1;
+""", out="my_table"
+)
+
+test("""
+CREATE TABLE my_table(my_column INTEGER);
+SELECT * FROM sql_auto_complete('SELECT my_column FROM my_table WH') LIMIT 1;
+""", out="WHERE"
+)
+
+test("""
+CREATE TABLE my_table(my_column INTEGER);
+SELECT * FROM sql_auto_complete('INS') LIMIT 1;
+""", out="INSERT"
+)
+
+test("""
+CREATE TABLE my_table(my_column INTEGER);
+SELECT * FROM sql_auto_complete('INSERT IN') LIMIT 1;
+""", out="INTO"
+)
+
+test("""
+CREATE TABLE my_table(my_column INTEGER);
+SELECT * FROM sql_auto_complete('INSERT INTO my_t') LIMIT 1;
+""", out="my_table"
+)
+
+test("""
+CREATE TABLE my_table(my_column INTEGER);
+SELECT * FROM sql_auto_complete('INSERT INTO my_table VAL') LIMIT 1;
+""", out="VALUES"
+)
+
+test("""
+CREATE TABLE my_table(my_column INTEGER);
+SELECT * FROM sql_auto_complete('DEL') LIMIT 1;
+""", out="DELETE"
+)
+
+test("""
+CREATE TABLE my_table(my_column INTEGER);
+SELECT * FROM sql_auto_complete('DELETE F') LIMIT 1;
+""", out="FROM"
+)
+
+test("""
+CREATE TABLE my_table(my_column INTEGER);
+SELECT * FROM sql_auto_complete('DELETE FROM m') LIMIT 1;
+""", out="my_table"
+)
+
+test("""
+CREATE TABLE my_table(my_column INTEGER);
+SELECT * FROM sql_auto_complete('DELETE FROM my_table WHERE m') LIMIT 1;
+""", out="my_column"
+)
+
+test("""
+CREATE TABLE my_table(my_column INTEGER);
+SELECT * FROM sql_auto_complete('U') LIMIT 1;
+""", out="UPDATE"
+)
+
+test("""
+CREATE TABLE my_table(my_column INTEGER);
+SELECT * FROM sql_auto_complete('UPDATE m') LIMIT 1;
+""", out="my_table"
+)
+
+test("""
+CREATE TABLE my_table(my_column INTEGER);
+SELECT * FROM sql_auto_complete('UPDATE "m') LIMIT 1;
+""", out="my_table"
+)
+
+test("""
+CREATE TABLE my_table(my_column INTEGER);
+SELECT * FROM sql_auto_complete('UPDATE my_table SET m') LIMIT 1;
+""", out="my_column"
+)
+
+
+test("""
+CREATE TABLE "Funky Table With Spaces"(my_column INTEGER);
+SELECT * FROM sql_auto_complete('SELECT * FROM F') LIMIT 1;
+""", out="\"Funky Table With Spaces\""
+)
+
+test("""
+CREATE TABLE "Funky Table With Spaces"("Funky Column" int);
+SELECT * FROM sql_auto_complete('select f') LIMIT 1;
+""", out="\"Funky Column\""
+)
+
+test("""
+CREATE TABLE "Funky Table With Spaces"("Funky Column" int);
+SELECT * FROM sql_auto_complete('select "Funky Column" FROM f') LIMIT 1;
+""", out="\"Funky Table With Spaces\""
+)
+
+# semicolon
+test("""
+SELECT * FROM sql_auto_complete('SELECT 42; SEL') LIMIT 1;
+""", out="SELECT"
+)
+
+# comments
+test("""
+SELECT * FROM sql_auto_complete('--SELECT * FROM
+SEL') LIMIT 1;
+""", out="SELECT"
+)
+
+# scalar functions
+test("""
+SELECT * FROM sql_auto_complete('SELECT regexp_m') LIMIT 1;
+""", out="regexp_matches"
+)
+
+# aggregate functions
+test("""
+SELECT * FROM sql_auto_complete('SELECT approx_c') LIMIT 1;
+""", out="approx_count_distinct"
+)
+
+# built-in views
+test("""
+SELECT * FROM sql_auto_complete('SELECT * FROM sqlite_ma') LIMIT 1;
+""", out="sqlite_master"
+)
+
+# table functions
+test("""
+SELECT * FROM sql_auto_complete('SELECT * FROM read_csv_a') LIMIT 1;
+""", out="read_csv_auto"
+)
+
+test("""
+CREATE TABLE partsupp(ps_suppkey int);
+CREATE TABLE supplier(s_suppkey int);
+CREATE TABLE nation(n_nationkey int);
+SELECT * FROM sql_auto_complete('DROP TABLE na') LIMIT 1;
+""", out="nation"
+)
+
+test("""
+CREATE TABLE partsupp(ps_suppkey int);
+CREATE TABLE supplier(s_suppkey int);
+CREATE TABLE nation(n_nationkey int);
+SELECT * FROM sql_auto_complete('SELECT s_supp') LIMIT 1;
+""", out="s_suppkey"
+)
+
+# joins
+test("""
+CREATE TABLE partsupp(ps_suppkey int);
+CREATE TABLE supplier(s_suppkey int);
+CREATE TABLE nation(n_nationkey int);
+SELECT * FROM sql_auto_complete('SELECT * FROM partsupp JOIN supp') LIMIT 1;
+""", out="supplier"
+)
+
+test("""
+CREATE TABLE partsupp(ps_suppkey int);
+CREATE TABLE supplier(s_suppkey int);
+CREATE TABLE nation(n_nationkey int);
+.mode csv
+SELECT l,l FROM sql_auto_complete('SELECT * FROM partsupp JOIN supplier ON (s_supp') t(l) LIMIT 1;
+""", out="s_suppkey,s_suppkey"
+)
+
+test("""
+CREATE TABLE partsupp(ps_suppkey int);
+CREATE TABLE supplier(s_suppkey int);
+CREATE TABLE nation(n_nationkey int);
+SELECT * FROM sql_auto_complete('SELECT * FROM partsupp JOIN supplier USING (ps_') LIMIT 1;
+""", out="ps_suppkey"
+)
+
+test("""
+SELECT * FROM sql_auto_complete('SELECT * FR') LIMIT 1;
+""", out="FROM"
+)
+
+test("""
+CREATE TABLE MyTable(MyColumn Varchar);
+SELECT * FROM sql_auto_complete('SELECT My') LIMIT 1;
+""", out="MyColumn"
+)
+
+test("""
+CREATE TABLE MyTable(MyColumn Varchar);
+SELECT * FROM sql_auto_complete('SELECT MyColumn FROM My') LIMIT 1;
+""", out="MyTable"
+)
+
+# duckbox renderer displays the number of rows if there are none
+test('''
+.mode duckbox
+select 42 limit 0;
+''', out='0 rows')
+
+# #5411 - with maxrows=2, we still display all 4 rows (hiding them would take up more space)
+test('''
+.maxrows 2
+select * from range(4);
+''', out='1')
+
+outfile = tf()
+test('''
+.maxrows 2
+.output %s
+SELECT * FROM range(100);
+''' % outfile)
+outstr = open(outfile,'rb').read().decode('utf8')
+if '50' not in outstr:
+     raise Exception('.output test failed')
+
+# we always display all columns when outputting to a file
+columns = ', '.join([str(x) for x in range(100)])
+outfile = tf()
+test('''
+.output %s
+SELECT %s
+''' % (outfile, columns))
+outstr = open(outfile,'rb').read().decode('utf8')
+if '99' not in outstr:
+     raise Exception('.output test failed')
+
+# test null-byte rendering
+test('select varchar from test_all_types();', out='goo\\0se')
+
+# null byte in error message
+test('select chr(0)::int', err='INT32')
+
+if os.name != 'nt':
+     shell_test_dir = 'shell_test_dir'
+     try:
+          os.mkdir(shell_test_dir)
+     except:
+          pass
+     try:
+          os.mkdir(os.path.join(shell_test_dir, 'extra_path'))
+     except:
+          pass
+
+     base_files = ['extra.parquet', 'extra.file']
+     for fname in base_files:
+          with open(os.path.join(shell_test_dir, fname), 'w+') as f:
+               f.write('')
+
+     test("""
+     CREATE TABLE MyTable(MyColumn Varchar);
+     SELECT * FROM sql_auto_complete('SELECT * FROM ''shell_test') LIMIT 1;
+     """, out="shell_test_dir/"
+          )
+
+     test("""
+     CREATE TABLE MyTable(MyColumn Varchar);
+     SELECT * FROM sql_auto_complete('SELECT * FROM ''shell_test_dir/extra') LIMIT 1;
+     """, out="extra_path/"
+          )
+
+     test("""
+     CREATE TABLE MyTable(MyColumn Varchar);
+     SELECT * FROM sql_auto_complete('SELECT * FROM ''shell_test_dir/extra.par') LIMIT 1;
+     """, out="extra.parquet"
+          )
+
+     shutil.rmtree(shell_test_dir)
+
+# test backwards compatibility
+test('.open test/storage/bc/db_dev.db', err='older development version')
+test('.open test/storage/bc/db_031.db', err='v0.3.1')
+test('.open test/storage/bc/db_032.db', err='v0.3.2')
+test('.open test/storage/bc/db_04.db', err='v0.4.0')
+test('.open test/storage/bc/db_051.db', err='v0.5.1')
+test('.open test/storage/bc/db_060.db', err='v0.6.0')
+
 if os.name != 'nt':
      test('''
 create table mytable as select * from
@@ -638,6 +971,45 @@ select channel,i_brand_id,sum_sales,number_sales from mytable;
           input_file='data/csv/tpcds_14.csv',
           out='''web,8006004,844.21,21''')
 
+     test('''create table mytable as select * from
+read_json_objects('/dev/stdin');
+select * from mytable;
+          ''',
+          extra_commands=['-list', ':memory:'],
+          input_file='data/json/example_rn.ndjson',
+          out='''json
+{"id":1,"name":"O Brother, Where Art Thou?"}
+{"id":2,"name":"Home for the Holidays"}
+{"id":3,"name":"The Firm"}
+{"id":4,"name":"Broadcast News"}
+{"id":5,"name":"Raising Arizona"}''')
+
+     test('''create table mytable as select * from
+read_ndjson_objects('/dev/stdin');
+select * from mytable;
+          ''',
+          extra_commands=['-list', ':memory:'],
+          input_file='data/json/example_rn.ndjson',
+          out='''json
+{"id":1,"name":"O Brother, Where Art Thou?"}
+{"id":2,"name":"Home for the Holidays"}
+{"id":3,"name":"The Firm"}
+{"id":4,"name":"Broadcast News"}
+{"id":5,"name":"Raising Arizona"}''')
+
+     test('''create table mytable as select * from
+read_json_auto('/dev/stdin');
+select * from mytable;
+          ''',
+          extra_commands=['-list', ':memory:'],
+          input_file='data/json/example_rn.ndjson',
+          out='''id|name
+1|O Brother, Where Art Thou?
+2|Home for the Holidays
+3|The Firm
+4|Broadcast News
+5|Raising Arizona''')
+
      test('''
      COPY (SELECT 42) TO '/dev/stdout' WITH (FORMAT 'csv');
      ''',
@@ -660,3 +1032,10 @@ select channel,i_brand_id,sum_sales,number_sales from mytable;
      copy (select 42) to '/dev/stdout'
      ''',
      out='''42''')
+
+     test('''
+     select list(concat('thisisalongstring', range::VARCHAR)) i from range(10000)
+     ''',
+     out='''thisisalongstring''')
+
+     test("copy (select * from range(10000) tbl(i)) to '/dev/stdout' (format csv)", out='9999', output_file=tf())

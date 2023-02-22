@@ -12,6 +12,7 @@ def check_equal(duckdb_conn):
     duck_from_arrow = duckdb_conn.from_arrow(duck_tbl.arrow())
     duck_from_arrow.create("testarrow")
     arrow_result = duckdb_conn.execute("SELECT * from testarrow").fetchall()
+    assert(arrow_result == true_result)
 
 class TestArrowFetch(object):
     def test_over_vector_size(self, duckdb_cursor):
@@ -26,7 +27,6 @@ class TestArrowFetch(object):
 
         check_equal(duckdb_conn)
 
-        assert(arrow_result == true_result)
     def test_empty_table(self, duckdb_cursor):
         if not can_run:
             return
@@ -94,5 +94,5 @@ class TestArrowFetch(object):
         relation = duckdb_cursor.table('t')
         arrow_tbl = relation.arrow()
         assert arrow_tbl['a'].num_chunks == 1
-        arrow_tbl = relation.arrow(1024)
-        assert arrow_tbl['a'].num_chunks == 3
+        arrow_tbl = relation.arrow(2048)
+        assert arrow_tbl['a'].num_chunks == 2

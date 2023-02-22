@@ -10,31 +10,18 @@
 
 #include "duckdb/parser/parsed_data/create_function_info.hpp"
 #include "duckdb/function/pragma_function.hpp"
+#include "duckdb/function/function_set.hpp"
 
 namespace duckdb {
 
 struct CreatePragmaFunctionInfo : public CreateFunctionInfo {
-	explicit CreatePragmaFunctionInfo(PragmaFunction function)
-	    : CreateFunctionInfo(CatalogType::PRAGMA_FUNCTION_ENTRY) {
-		functions.push_back(move(function));
-		this->name = function.name;
-	}
-	CreatePragmaFunctionInfo(string name, vector<PragmaFunction> functions_)
-	    : CreateFunctionInfo(CatalogType::PRAGMA_FUNCTION_ENTRY), functions(move(functions_)) {
-		this->name = name;
-		for (auto &function : functions) {
-			function.name = name;
-		}
-	}
+	DUCKDB_API explicit CreatePragmaFunctionInfo(PragmaFunction function);
+	DUCKDB_API CreatePragmaFunctionInfo(string name, PragmaFunctionSet functions_);
 
-	vector<PragmaFunction> functions;
+	PragmaFunctionSet functions;
 
 public:
-	unique_ptr<CreateInfo> Copy() const override {
-		auto result = make_unique<CreatePragmaFunctionInfo>(functions[0].name, functions);
-		CopyProperties(*result);
-		return move(result);
-	}
+	DUCKDB_API unique_ptr<CreateInfo> Copy() const override;
 };
 
 } // namespace duckdb

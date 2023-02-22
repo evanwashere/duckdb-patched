@@ -22,7 +22,7 @@ unique_ptr<ExpressionState> ExpressionExecutor::InitializeState(const BoundCaseE
 	}
 	result->AddChild(expr.else_expr.get());
 	result->Finalize();
-	return move(result);
+	return std::move(result);
 }
 
 void ExpressionExecutor::Execute(const BoundCaseExpression &expr, ExpressionState *state_p, const SelectionVector *sel,
@@ -103,8 +103,8 @@ void TemplatedFillLoop(Vector &vector, Vector &result, const SelectionVector &se
 			}
 		}
 	} else {
-		VectorData vdata;
-		vector.Orrify(count, vdata);
+		UnifiedVectorFormat vdata;
+		vector.ToUnifiedFormat(count, vdata);
 		auto data = (T *)vdata.data;
 		for (idx_t i = 0; i < count; i++) {
 			auto source_idx = vdata.sel->get_index(i);
@@ -126,8 +126,8 @@ void ValidityFillLoop(Vector &vector, Vector &result, const SelectionVector &sel
 			}
 		}
 	} else {
-		VectorData vdata;
-		vector.Orrify(count, vdata);
+		UnifiedVectorFormat vdata;
+		vector.ToUnifiedFormat(count, vdata);
 		if (vdata.validity.AllValid()) {
 			return;
 		}

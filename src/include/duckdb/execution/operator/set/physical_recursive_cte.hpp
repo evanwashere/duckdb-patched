@@ -8,10 +8,11 @@
 
 #pragma once
 
+#include "duckdb/common/types/column_data_collection.hpp"
 #include "duckdb/execution/physical_operator.hpp"
 
 namespace duckdb {
-class Pipeline;
+
 class RecursiveCTEState;
 
 class PhysicalRecursiveCTE : public PhysicalOperator {
@@ -21,8 +22,8 @@ public:
 	~PhysicalRecursiveCTE() override;
 
 	bool union_all;
-	std::shared_ptr<ChunkCollection> working_table;
-	vector<shared_ptr<Pipeline>> pipelines;
+	std::shared_ptr<ColumnDataCollection> working_table;
+	shared_ptr<MetaPipeline> recursive_meta_pipeline;
 
 public:
 	// Source interface
@@ -41,7 +42,7 @@ public:
 	}
 
 public:
-	void BuildPipelines(Executor &executor, Pipeline &current, PipelineBuildState &state) override;
+	void BuildPipelines(Pipeline &current, MetaPipeline &meta_pipeline) override;
 
 	vector<const PhysicalOperator *> GetSources() const override;
 

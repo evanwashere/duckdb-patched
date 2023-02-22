@@ -37,7 +37,7 @@ for arg in sys.argv[1:]:
 # parse the keyword lists
 def read_list_from_file(fname):
     with open_utf8(fname, 'r') as f:
-        return f.read().split('\n')
+        return [x.strip() for x in f.read().split('\n') if len(x.strip()) > 0]
 
 kwdir = os.path.join(base_dir, 'keywords')
 unreserved_keywords = read_list_from_file(os.path.join(kwdir, 'unreserved_keywords.list'))
@@ -251,7 +251,23 @@ if res != 0:
         print("In case of shift/reduce conflicts, try re-running with --counterexamples")
         print("Note: this requires a more recent version of Bison (e.g. version 3.8)")
         print("On a Macbook you can obtain this using \"brew install bison\"")
+    if counterexamples and 'time limit exceeded' in text:
+        print("---------------------------------------------------------------------")
+        print("The counterexamples time limit was exceeded. This likely means that no useful counterexample was generated.")
+        print("")
+        print("The counterexamples time limit can be increased by setting the TIME_LIMIT environment variable, e.g.:")
+        print("export TIME_LIMIT=100")
     exit(1)
+
 
 os.rename(result_source, target_source_loc)
 os.rename(result_header, target_header_loc)
+
+with open_utf8(target_source_loc, 'r') as f:
+    text = f.read()
+
+text = text.replace('#include "grammar_out.hpp"', '#include "include/parser/gram.hpp"')
+text = text.replace('yynerrs = 0;', 'yynerrs = 0; (void)yynerrs;')
+
+with open_utf8(target_source_loc, 'w+') as f:
+    f.write(text)

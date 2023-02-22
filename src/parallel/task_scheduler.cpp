@@ -16,7 +16,7 @@ namespace duckdb {
 
 struct SchedulerThread {
 #ifndef DUCKDB_NO_THREADS
-	explicit SchedulerThread(unique_ptr<thread> thread_p) : internal_thread(move(thread_p)) {
+	explicit SchedulerThread(unique_ptr<thread> thread_p) : internal_thread(std::move(thread_p)) {
 	}
 
 	unique_ptr<thread> internal_thread;
@@ -44,7 +44,7 @@ struct QueueProducerToken {
 
 void ConcurrentQueue::Enqueue(ProducerToken &token, unique_ptr<Task> task) {
 	lock_guard<mutex> producer_lock(token.producer_lock);
-	if (q.enqueue(token.token->queue_token, move(task))) {
+	if (q.enqueue(token.token->queue_token, std::move(task))) {
 		semaphore.signal();
 	} else {
 		throw InternalException("Could not schedule task!");
@@ -67,7 +67,7 @@ struct ConcurrentQueue {
 
 void ConcurrentQueue::Enqueue(ProducerToken &token, unique_ptr<Task> task) {
 	lock_guard<mutex> lock(qlock);
-	q.push(move(task));
+	q.push(std::move(task));
 }
 
 bool ConcurrentQueue::DequeueFromProducer(ProducerToken &token, unique_ptr<Task> &task) {
@@ -75,7 +75,7 @@ bool ConcurrentQueue::DequeueFromProducer(ProducerToken &token, unique_ptr<Task>
 	if (q.empty()) {
 		return false;
 	}
-	task = move(q.front());
+	task = std::move(q.front());
 	q.pop();
 	return true;
 }
@@ -87,7 +87,7 @@ struct QueueProducerToken {
 #endif
 
 ProducerToken::ProducerToken(TaskScheduler &scheduler, unique_ptr<QueueProducerToken> token)
-    : scheduler(scheduler), token(move(token)) {
+    : scheduler(scheduler), token(std::move(token)) {
 }
 
 ProducerToken::~ProducerToken() {
@@ -112,12 +112,12 @@ TaskScheduler &TaskScheduler::GetScheduler(DatabaseInstance &db) {
 
 unique_ptr<ProducerToken> TaskScheduler::CreateProducer() {
 	auto token = make_unique<QueueProducerToken>(*queue);
-	return make_unique<ProducerToken>(*this, move(token));
+	return make_unique<ProducerToken>(*this, std::move(token));
 }
 
 void TaskScheduler::ScheduleTask(ProducerToken &token, unique_ptr<Task> task) {
 	// Enqueue a task for the given producer token and signal any sleeping threads
-	queue->Enqueue(token, move(task));
+	queue->Enqueue(token, std::move(task));
 }
 
 bool TaskScheduler::GetTaskFromProducer(ProducerToken &token, unique_ptr<Task> &task) {
@@ -129,13 +129,32 @@ void TaskScheduler::ExecuteForever(atomic<bool> *marker) {
 	unique_ptr<Task> task;
 	// loop until the marker is set to false
 	while (*marker) {
-		// wait for a signal with a timeout; the timeout allows us to periodically check
+		// wait for a signal with a timeout
 		queue->semaphore.wait();
 		if (queue->q.try_dequeue(task)) {
 			task->Execute(TaskExecutionMode::PROCESS_ALL);
 			task.reset();
 		}
 	}
+#else
+	throw NotImplementedException("DuckDB was compiled without threads! Background thread loop is not allowed.");
+#endif
+}
+
+idx_t TaskScheduler::ExecuteTasks(atomic<bool> *marker, idx_t max_tasks) {
+#ifndef DUCKDB_NO_THREADS
+	idx_t completed_tasks = 0;
+	// loop until the marker is set to false
+	while (*marker && completed_tasks < max_tasks) {
+		unique_ptr<Task> task;
+		if (!queue->q.try_dequeue(task)) {
+			return completed_tasks;
+		}
+		task->Execute(TaskExecutionMode::PROCESS_ALL);
+		task.reset();
+		completed_tasks++;
+	}
+	return completed_tasks;
 #else
 	throw NotImplementedException("DuckDB was compiled without threads! Background thread loop is not allowed.");
 #endif
@@ -168,12 +187,14 @@ static void ThreadExecuteTasks(TaskScheduler *scheduler, atomic<bool> *marker) {
 #endif
 
 int32_t TaskScheduler::NumberOfThreads() {
+	lock_guard<mutex> t(thread_lock);
 	auto &config = DBConfig::GetConfig(db);
-	return threads.size() + config.external_threads + 1;
+	return threads.size() + config.options.external_threads + 1;
 }
 
 void TaskScheduler::SetThreads(int32_t n) {
 #ifndef DUCKDB_NO_THREADS
+	lock_guard<mutex> t(thread_lock);
 	if (n < 1) {
 		throw SyntaxException("Must have at least 1 thread!");
 	}
@@ -182,6 +203,12 @@ void TaskScheduler::SetThreads(int32_t n) {
 	if (n != 1) {
 		throw NotImplementedException("DuckDB was compiled without threads! Setting threads > 1 is not allowed.");
 	}
+#endif
+}
+
+void TaskScheduler::Signal(idx_t n) {
+#ifndef DUCKDB_NO_THREADS
+	queue->semaphore.signal(n);
 #endif
 }
 
@@ -196,7 +223,7 @@ void TaskScheduler::SetThreadsInternal(int32_t n) {
 		for (idx_t i = 0; i < threads.size(); i++) {
 			*markers[i] = false;
 		}
-		queue->semaphore.signal(threads.size());
+		Signal(threads.size());
 		// now join the threads to ensure they are fully stopped before erasing them
 		for (idx_t i = 0; i < threads.size(); i++) {
 			threads[i]->internal_thread->join();
@@ -212,10 +239,10 @@ void TaskScheduler::SetThreadsInternal(int32_t n) {
 			// launch a thread and assign it a cancellation marker
 			auto marker = unique_ptr<atomic<bool>>(new atomic<bool>(true));
 			auto worker_thread = make_unique<thread>(ThreadExecuteTasks, this, marker.get());
-			auto thread_wrapper = make_unique<SchedulerThread>(move(worker_thread));
+			auto thread_wrapper = make_unique<SchedulerThread>(std::move(worker_thread));
 
-			threads.push_back(move(thread_wrapper));
-			markers.push_back(move(marker));
+			threads.push_back(std::move(thread_wrapper));
+			markers.push_back(std::move(marker));
 		}
 	}
 #endif

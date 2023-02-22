@@ -171,6 +171,8 @@ test("SELECT TIMESTAMP '2008-01-01 00:00:01.5'::VARCHAR", out='2008-01-01 00:00:
 test("SELECT TIMESTAMP '-8-01-01 00:00:01.5'::VARCHAR", out='0009-01-01 (BC) 00:00:01.5')
 test("SELECT TIMESTAMP '100000-01-01 00:00:01.5'::VARCHAR", out='100000-01-01 00:00:01.5')
 
+test("UPDATE timestamp SET t = strptime('20221215101010','%Y%m%d%H%M%S') WHERE t='2008-01-01 00:00:01'::TIMESTAMP")
+
 ### FROM test/sql/types/time/test_time.test #################################
 test(
 """CREATE TABLE times(i TIME);
@@ -249,7 +251,7 @@ test("SELECT '9223372036854788.758'::DECIMAL;", err="[ISQL]ERROR")
 
 test("SELECT '0.1'::DECIMAL(3, 0)::VARCHAR;", out='0')
 test("SELECT '123.4'::DECIMAL(9)::VARCHAR;", out='123')
-test("SELECT '0.1'::DECIMAL(3, 3)::VARCHAR, '-0.1'::DECIMAL(3, 3)::VARCHAR;", out='0.100|-0.100')
+test("SELECT '0.1'::DECIMAL(3, 3)::VARCHAR, '-0.1'::DECIMAL(3, 3)::VARCHAR;", out='.100|-.100')
 
 test("SELECT '1'::DECIMAL(3, 3)::VARCHAR;", err="[ISQL]ERROR")
 test("SELECT '-1'::DECIMAL(3, 3)::VARCHAR;", err="[ISQL]ERROR")

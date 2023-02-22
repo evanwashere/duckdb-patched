@@ -58,16 +58,19 @@ else()
   add_subdirectory(parallel)
   add_subdirectory(storage)
   add_subdirectory(transaction)
+  add_subdirectory(verification)
 
   set(DUCKDB_LINK_LIBS
       ${DUCKDB_SYSTEM_LIBS}
+      duckdb_fsst
       duckdb_fmt
       duckdb_pg_query
       duckdb_re2
       duckdb_miniz
       duckdb_utf8proc
       duckdb_hyperloglog
-      duckdb_fastpforlib)
+      duckdb_fastpforlib
+      duckdb_mbedtls)
 
   add_library(duckdb SHARED ${ALL_OBJECT_FILES})
   target_link_libraries(duckdb ${DUCKDB_LINK_LIBS})
@@ -100,6 +103,7 @@ endif()
 
 if(BUILD_PYTHON
    OR BUILD_R
+   OR BUILD_NODE
    OR CONFIGURE_R)
   if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     set(ALL_COMPILE_FLAGS "${CMAKE_CXX_FLAGS} ${CMAKE_CXX_FLAGS_DEBUG}")
@@ -118,8 +122,9 @@ if(BUILD_PYTHON
     if(USER_SPACE)
       add_custom_target(
         duckdb_python ALL
-        COMMAND python3 setup.py install --user --binary-dir=${CMAKE_BINARY_DIR}
-                --compile-flags=${ALL_COMPILE_FLAGS} --libs="${duckdb_libs}"
+        COMMAND
+          python3 setup.py install --user --binary-dir=${PROJECT_BINARY_DIR}
+          --compile-flags=${ALL_COMPILE_FLAGS} --libs="${duckdb_libs}"
         DEPENDS duckdb
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}/tools/pythonpkg
         COMMENT Build
@@ -127,7 +132,7 @@ if(BUILD_PYTHON
     else()
       add_custom_target(
         duckdb_python ALL
-        COMMAND python3 setup.py install --binary-dir=${CMAKE_BINARY_DIR}
+        COMMAND python3 setup.py install --binary-dir=${PROJECT_BINARY_DIR}
                 --compile-flags=${ALL_COMPILE_FLAGS} --libs="${duckdb_libs}"
         DEPENDS duckdb
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}/tools/pythonpkg
@@ -140,7 +145,7 @@ if(BUILD_PYTHON
     add_custom_target(
       duckdb_configure_r ALL
       COMMAND
-        DUCKDB_R_BINDIR=${CMAKE_BINARY_DIR}
+        DUCKDB_R_BINDIR=${PROJECT_BINARY_DIR}
         DUCKDB_R_CFLAGS=\"${ALL_COMPILE_FLAGS}\"
         DUCKDB_R_LIBS=\"${duckdb_libs}\" python3 rconfigure.py
       DEPENDS duckdb
@@ -153,7 +158,7 @@ if(BUILD_PYTHON
     add_custom_target(
       duckdb_r ALL
       COMMAND
-        DUCKDB_R_BINDIR=${CMAKE_BINARY_DIR}
+        DUCKDB_R_BINDIR=${PROJECT_BINARY_DIR}
         DUCKDB_R_CFLAGS=\"${ALL_COMPILE_FLAGS}\"
         DUCKDB_R_LIBS=\"${duckdb_libs}\" DUCKDB_R_DEBUG= R CMD INSTALL .
       DEPENDS duckdb
@@ -161,6 +166,19 @@ if(BUILD_PYTHON
       COMMENT Build
       R package)
     add_extension_dependencies(duckdb_r)
+  endif()
+  if(BUILD_NODE)
+    add_custom_target(
+      duckdb_node ALL
+      COMMAND
+        make complete_build DUCKDB_NODE_BINDIR=${CMAKE_BINARY_DIR}
+        DUCKDB_NODE_CFLAGS=\"${ALL_COMPILE_FLAGS}\"
+        DUCKDB_NODE_LIBS=\"${duckdb_libs}\"
+      DEPENDS duckdb
+      WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}/tools/nodejs
+      COMMENT Build
+      Node package)
+    add_extension_dependencies(duckdb_node)
   endif()
 endif()
 

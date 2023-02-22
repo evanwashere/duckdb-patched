@@ -1,21 +1,20 @@
-#include "duckdb/common/arrow.hpp"
+#include "duckdb/common/arrow/arrow.hpp"
 
 #include "duckdb.hpp"
-#include "duckdb/common/arrow_wrapper.hpp"
+#include "duckdb/common/arrow/arrow_wrapper.hpp"
 #include "duckdb/common/limits.hpp"
-#include "duckdb/common/types/date.hpp"
 #include "duckdb/common/to_string.hpp"
+#include "duckdb/common/types/date.hpp"
+#include "duckdb/common/types/vector_buffer.hpp"
 #include "duckdb/function/table/arrow.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/parser/parsed_data/create_table_function_info.hpp"
 #include "utf8proc_wrapper.hpp"
-#include "duckdb/common/types/vector_buffer.hpp"
 
 namespace duckdb {
 
-LogicalType GetArrowLogicalType(ArrowSchema &schema,
-                                std::unordered_map<idx_t, unique_ptr<ArrowConvertData>> &arrow_convert_data,
-                                idx_t col_idx) {
+LogicalType ArrowTableFunction::GetArrowLogicalType(
+    ArrowSchema &schema, std::unordered_map<idx_t, unique_ptr<ArrowConvertData>> &arrow_convert_data, idx_t col_idx) {
 	auto format = string(schema.format);
 	if (arrow_convert_data.find(col_idx) == arrow_convert_data.end()) {
 		arrow_convert_data[col_idx] = make_unique<ArrowConvertData>();
@@ -115,27 +114,23 @@ LogicalType GetArrowLogicalType(ArrowSchema &schema,
 		idx_t fixed_size = std::stoi(parameters);
 		arrow_convert_data[col_idx]->variable_sz_type.emplace_back(ArrowVariableSizeType::FIXED_SIZE, fixed_size);
 		auto child_type = GetArrowLogicalType(*schema.children[0], arrow_convert_data, col_idx);
-		return LogicalType::LIST(move(child_type));
+		return LogicalType::LIST(std::move(child_type));
 	} else if (format == "+s") {
 		child_list_t<LogicalType> child_types;
 		for (idx_t type_idx = 0; type_idx < (idx_t)schema.n_children; type_idx++) {
 			auto child_type = GetArrowLogicalType(*schema.children[type_idx], arrow_convert_data, col_idx);
 			child_types.push_back({schema.children[type_idx]->name, child_type});
 		}
-		return LogicalType::STRUCT(move(child_types));
+		return LogicalType::STRUCT(std::move(child_types));
 
 	} else if (format == "+m") {
-		child_list_t<LogicalType> child_types;
-		//! First type will be struct, so we skip it
-		auto &struct_schema = *schema.children[0];
-		for (idx_t type_idx = 0; type_idx < (idx_t)struct_schema.n_children; type_idx++) {
-			//! The other types must be added on lists
-			auto child_type = GetArrowLogicalType(*struct_schema.children[type_idx], arrow_convert_data, col_idx);
+		arrow_convert_data[col_idx]->variable_sz_type.emplace_back(ArrowVariableSizeType::NORMAL, 0);
 
-			auto list_type = LogicalType::LIST(child_type);
-			child_types.push_back({struct_schema.children[type_idx]->name, list_type});
-		}
-		return LogicalType::MAP(move(child_types));
+		auto &arrow_struct_type = *schema.children[0];
+		D_ASSERT(arrow_struct_type.n_children == 2);
+		auto key_type = GetArrowLogicalType(*arrow_struct_type.children[0], arrow_convert_data, col_idx);
+		auto value_type = GetArrowLogicalType(*arrow_struct_type.children[1], arrow_convert_data, col_idx);
+		return LogicalType::MAP(key_type, value_type);
 	} else if (format == "z") {
 		arrow_convert_data[col_idx]->variable_sz_type.emplace_back(ArrowVariableSizeType::NORMAL, 0);
 		return LogicalType::BLOB;
@@ -167,8 +162,7 @@ LogicalType GetArrowLogicalType(ArrowSchema &schema,
 	}
 }
 
-// Renames repeated columns and case sensitive columns
-void RenameArrowColumns(vector<string> &names) {
+void ArrowTableFunction::RenameArrowColumns(vector<string> &names) {
 	unordered_map<string, idx_t> name_map;
 	for (auto &column_name : names) {
 		// put it all lower_case
@@ -197,10 +191,8 @@ unique_ptr<FunctionData> ArrowTableFunction::ArrowScanBind(ClientContext &contex
 	auto stream_factory_ptr = input.inputs[0].GetPointer();
 	auto stream_factory_produce = (stream_factory_produce_t)input.inputs[1].GetPointer();
 	auto stream_factory_get_schema = (stream_factory_get_schema_t)input.inputs[2].GetPointer();
-	auto rows_per_thread = input.inputs[3].GetValue<uint64_t>();
 
-	pair<unordered_map<idx_t, string>, vector<string>> project_columns;
-	auto res = make_unique<ArrowScanFunctionData>(rows_per_thread, stream_factory_produce, stream_factory_ptr);
+	auto res = make_unique<ArrowScanFunctionData>(stream_factory_produce, stream_factory_ptr);
 
 	auto &data = *res;
 	stream_factory_get_schema(stream_factory_ptr, data.schema_root);
@@ -224,45 +216,48 @@ unique_ptr<FunctionData> ArrowTableFunction::ArrowScanBind(ClientContext &contex
 		names.push_back(name);
 	}
 	RenameArrowColumns(names);
-	return move(res);
+	res->all_types = return_types;
+	return std::move(res);
 }
 
 unique_ptr<ArrowArrayStreamWrapper> ProduceArrowScan(const ArrowScanFunctionData &function,
                                                      const vector<column_t> &column_ids, TableFilterSet *filters) {
 	//! Generate Projection Pushdown Vector
-	pair<unordered_map<idx_t, string>, vector<string>> project_columns;
+	ArrowStreamParameters parameters;
 	D_ASSERT(!column_ids.empty());
 	for (idx_t idx = 0; idx < column_ids.size(); idx++) {
 		auto col_idx = column_ids[idx];
 		if (col_idx != COLUMN_IDENTIFIER_ROW_ID) {
 			auto &schema = *function.schema_root.arrow_schema.children[col_idx];
-			project_columns.first[idx] = schema.name;
-			project_columns.second.emplace_back(schema.name);
+			parameters.projected_columns.projection_map[idx] = schema.name;
+			parameters.projected_columns.columns.emplace_back(schema.name);
 		}
 	}
-	return function.scanner_producer(function.stream_factory_ptr, project_columns, filters);
+	parameters.filters = filters;
+	return function.scanner_producer(function.stream_factory_ptr, parameters);
 }
 
 idx_t ArrowTableFunction::ArrowScanMaxThreads(ClientContext &context, const FunctionData *bind_data_p) {
-	auto &bind_data = (const ArrowScanFunctionData &)*bind_data_p;
-	if (bind_data.number_of_rows <= 0 || ClientConfig::GetConfig(context).verify_parallelism) {
-		return context.db->NumberOfThreads();
-	}
-	return ((bind_data.number_of_rows + bind_data.rows_per_thread - 1) / bind_data.rows_per_thread) + 1;
+	return context.db->NumberOfThreads();
 }
 
-bool ArrowScanParallelStateNext(ClientContext &context, const FunctionData *bind_data_p, ArrowScanLocalState &state,
-                                ArrowScanGlobalState &parallel_state) {
+bool ArrowTableFunction::ArrowScanParallelStateNext(ClientContext &context, const FunctionData *bind_data_p,
+                                                    ArrowScanLocalState &state, ArrowScanGlobalState &parallel_state) {
 	lock_guard<mutex> parallel_lock(parallel_state.main_mutex);
+	if (parallel_state.done) {
+		return false;
+	}
 	state.chunk_offset = 0;
+	state.batch_index = ++parallel_state.batch_index;
 
 	auto current_chunk = parallel_state.stream->GetNextChunk();
 	while (current_chunk->arrow_array.length == 0 && current_chunk->arrow_array.release) {
 		current_chunk = parallel_state.stream->GetNextChunk();
 	}
-	state.chunk = move(current_chunk);
+	state.chunk = std::move(current_chunk);
 	//! have we run out of chunks? we are done
 	if (!state.chunk->arrow_array.release) {
+		parallel_state.done = true;
 		return false;
 	}
 	return true;
@@ -274,21 +269,35 @@ unique_ptr<GlobalTableFunctionState> ArrowTableFunction::ArrowScanInitGlobal(Cli
 	auto result = make_unique<ArrowScanGlobalState>();
 	result->stream = ProduceArrowScan(bind_data, input.column_ids, input.filters);
 	result->max_threads = ArrowScanMaxThreads(context, input.bind_data);
-	return move(result);
+	if (input.CanRemoveFilterColumns()) {
+		result->projection_ids = input.projection_ids;
+		for (const auto &col_idx : input.column_ids) {
+			if (col_idx == COLUMN_IDENTIFIER_ROW_ID) {
+				result->scanned_types.emplace_back(LogicalType::ROW_TYPE);
+			} else {
+				result->scanned_types.push_back(bind_data.all_types[col_idx]);
+			}
+		}
+	}
+	return std::move(result);
 }
 
-unique_ptr<LocalTableFunctionState> ArrowTableFunction::ArrowScanInitLocal(ClientContext &context,
+unique_ptr<LocalTableFunctionState> ArrowTableFunction::ArrowScanInitLocal(ExecutionContext &context,
                                                                            TableFunctionInitInput &input,
                                                                            GlobalTableFunctionState *global_state_p) {
 	auto &global_state = (ArrowScanGlobalState &)*global_state_p;
 	auto current_chunk = make_unique<ArrowArrayWrapper>();
-	auto result = make_unique<ArrowScanLocalState>(move(current_chunk));
+	auto result = make_unique<ArrowScanLocalState>(std::move(current_chunk));
 	result->column_ids = input.column_ids;
 	result->filters = input.filters;
-	if (!ArrowScanParallelStateNext(context, input.bind_data, *result, global_state)) {
+	if (input.CanRemoveFilterColumns()) {
+		auto &asgs = (ArrowScanGlobalState &)*global_state_p;
+		result->all_columns.Initialize(context.client, asgs.scanned_types);
+	}
+	if (!ArrowScanParallelStateNext(context.client, input.bind_data, *result, global_state)) {
 		return nullptr;
 	}
-	return move(result);
+	return std::move(result);
 }
 
 void ArrowTableFunction::ArrowScanFunction(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
@@ -307,36 +316,49 @@ void ArrowTableFunction::ArrowScanFunction(ClientContext &context, TableFunction
 	}
 	int64_t output_size = MinValue<int64_t>(STANDARD_VECTOR_SIZE, state.chunk->arrow_array.length - state.chunk_offset);
 	data.lines_read += output_size;
-	output.SetCardinality(output_size);
-	ArrowToDuckDB(state, data.arrow_convert_data, output, data.lines_read - output_size);
+	if (global_state.CanRemoveFilterColumns()) {
+		state.all_columns.Reset();
+		state.all_columns.SetCardinality(output_size);
+		ArrowToDuckDB(state, data.arrow_convert_data, state.all_columns, data.lines_read - output_size);
+		output.ReferenceColumns(state.all_columns, global_state.projection_ids);
+	} else {
+		output.SetCardinality(output_size);
+		ArrowToDuckDB(state, data.arrow_convert_data, output, data.lines_read - output_size);
+	}
+
 	output.Verify();
 	state.chunk_offset += output.size();
 }
 
 unique_ptr<NodeStatistics> ArrowTableFunction::ArrowScanCardinality(ClientContext &context, const FunctionData *data) {
-	auto &bind_data = (ArrowScanFunctionData &)*data;
-	return make_unique<NodeStatistics>(bind_data.number_of_rows, bind_data.number_of_rows);
+	return make_unique<NodeStatistics>();
 }
 
-double ArrowTableFunction::ArrowProgress(ClientContext &context, const FunctionData *bind_data_p,
-                                         const GlobalTableFunctionState *global_state) {
-	auto &bind_data = (const ArrowScanFunctionData &)*bind_data_p;
-	if (bind_data.number_of_rows == 0) {
-		return 100;
-	}
-	auto percentage = bind_data.lines_read * 100.0 / bind_data.number_of_rows;
-	return percentage;
+idx_t ArrowTableFunction::ArrowGetBatchIndex(ClientContext &context, const FunctionData *bind_data_p,
+                                             LocalTableFunctionState *local_state,
+                                             GlobalTableFunctionState *global_state) {
+	auto &state = (ArrowScanLocalState &)*local_state;
+	return state.batch_index;
 }
 
 void ArrowTableFunction::RegisterFunction(BuiltinFunctions &set) {
-	TableFunction arrow("arrow_scan",
-	                    {LogicalType::POINTER, LogicalType::POINTER, LogicalType::POINTER, LogicalType::UBIGINT},
+	TableFunction arrow("arrow_scan", {LogicalType::POINTER, LogicalType::POINTER, LogicalType::POINTER},
 	                    ArrowScanFunction, ArrowScanBind, ArrowScanInitGlobal, ArrowScanInitLocal);
 	arrow.cardinality = ArrowScanCardinality;
+	arrow.get_batch_index = ArrowGetBatchIndex;
 	arrow.projection_pushdown = true;
 	arrow.filter_pushdown = true;
-	arrow.table_scan_progress = ArrowProgress;
+	arrow.filter_prune = true;
 	set.AddFunction(arrow);
+
+	TableFunction arrow_dumb("arrow_scan_dumb", {LogicalType::POINTER, LogicalType::POINTER, LogicalType::POINTER},
+	                         ArrowScanFunction, ArrowScanBind, ArrowScanInitGlobal, ArrowScanInitLocal);
+	arrow_dumb.cardinality = ArrowScanCardinality;
+	arrow_dumb.get_batch_index = ArrowGetBatchIndex;
+	arrow_dumb.projection_pushdown = false;
+	arrow_dumb.filter_pushdown = false;
+	arrow_dumb.filter_prune = false;
+	set.AddFunction(arrow_dumb);
 }
 
 void BuiltinFunctions::RegisterArrowFunctions() {

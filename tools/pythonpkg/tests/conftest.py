@@ -1,4 +1,3 @@
-import numpy
 import os
 import pytest
 import shutil
@@ -43,10 +42,10 @@ def require():
         for path in extension_paths_found:
             print(path)
             if (path.endswith(extension_name+".duckdb_extension")):
-                conn = duckdb.connect(db_name)
+                conn = duckdb.connect(db_name, config={'allow_unsigned_extensions' : 'true'})
                 conn.execute(f"LOAD '{path}'")
                 return conn
-        return None
+        pytest.skip(f'could not load {extension_name}')
 
     return _require
 

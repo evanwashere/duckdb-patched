@@ -24,7 +24,7 @@ public:
 public:
 	string ToString() const override;
 
-	static bool Equals(const BetweenExpression *a, const BetweenExpression *b);
+	static bool Equal(const BetweenExpression *a, const BetweenExpression *b);
 
 	unique_ptr<ParsedExpression> Copy() const override;
 
@@ -34,7 +34,8 @@ public:
 public:
 	template <class T, class BASE>
 	static string ToString(const T &entry) {
-		return entry.input->ToString() + " BETWEEN " + entry.lower->ToString() + " AND " + entry.upper->ToString();
+		return "(" + entry.input->ToString() + " BETWEEN " + entry.lower->ToString() + " AND " +
+		       entry.upper->ToString() + ")";
 	}
 };
 } // namespace duckdb

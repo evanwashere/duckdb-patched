@@ -23,6 +23,9 @@ public:
 
 	//! The projection list of the WINDOW statement (may contain aggregates)
 	vector<unique_ptr<Expression>> select_list;
+	//! Whether or not the window is order dependent (only true if all window functions contain neither an order nor a
+	//! partition clause)
+	bool is_order_dependent;
 
 public:
 	// Source interface
@@ -36,11 +39,17 @@ public:
 		return true;
 	}
 
+	bool IsOrderPreserving() const override {
+		return true;
+	}
+
 public:
 	// Sink interface
 	SinkResultType Sink(ExecutionContext &context, GlobalSinkState &state, LocalSinkState &lstate,
 	                    DataChunk &input) const override;
 	void Combine(ExecutionContext &context, GlobalSinkState &state, LocalSinkState &lstate) const override;
+	SinkFinalizeType Finalize(Pipeline &pipeline, Event &event, ClientContext &context,
+	                          GlobalSinkState &gstate) const override;
 
 	unique_ptr<LocalSinkState> GetLocalSinkState(ExecutionContext &context) const override;
 	unique_ptr<GlobalSinkState> GetGlobalSinkState(ClientContext &context) const override;
@@ -50,7 +59,11 @@ public:
 	}
 
 	bool ParallelSink() const override {
-		return true;
+		return !is_order_dependent;
+	}
+
+	bool IsOrderDependent() const override {
+		return is_order_dependent;
 	}
 
 public:

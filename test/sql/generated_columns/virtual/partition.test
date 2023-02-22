@@ -5,8 +5,6 @@
 statement ok
 PRAGMA enable_verification
 
-require vector_size 512
-
 statement ok
 CREATE TABLE unit (
 	price INTEGER,
@@ -36,8 +34,9 @@ SELECT total_profit,
 		COUNT(total_profit) OVER(PARTITION BY total_profit) AS CountTotalProfit,
 		SUM(amount_sold) OVER(PARTITION BY total_profit) AS SumAmountSold,
 		SUM(price) OVER(PARTITION BY total_profit) AS SumPrice
-FROM unit;
+FROM unit
+ORDER BY 1, 2 DESC
 ----
-40	Mars bar	1	8	5
 20	Soda can	2	9	9
 20	Chewing gum	2	9	9
+40	Mars bar	1	8	5

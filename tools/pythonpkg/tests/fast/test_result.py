@@ -11,16 +11,16 @@ class TestPythonResult(object):
         rel = connection.table("integers")
         res = rel.aggregate("sum(i)").execute()
         res.close()
-        with pytest.raises(Exception):
+        with pytest.raises(duckdb.InvalidInputException, match='result closed'):
             res.fetchone()
-        with pytest.raises(Exception):
+        with pytest.raises(duckdb.InvalidInputException, match='result closed'):
             res.fetchall()
-        with pytest.raises(Exception):
+        with pytest.raises(duckdb.InvalidInputException, match='result closed'):
             res.fetchnumpy()
-        with pytest.raises(Exception):
+        with pytest.raises(duckdb.InvalidInputException, match='There is no query result'):
             res.fetch_arrow_table()
-        with pytest.raises(Exception):
-            res.fetch_arrow_reader()
+        with pytest.raises(duckdb.InvalidInputException, match='There is no query result'):
+            res.fetch_arrow_reader(1)
 
     def test_result_describe_types(self, duckdb_cursor):
         connection = duckdb.connect('')
@@ -29,7 +29,7 @@ class TestPythonResult(object):
         cursor.execute("INSERT INTO test VALUES (TRUE, '01:01:01', 'bla' )")
         rel = connection.table("test")
         res = rel.execute()
-        assert res.description() == [('i', 'bool', None, None, None, None, None), ('j', 'Time', None, None, None, None, None), ('k', 'STRING', None, None, None, None, None)]
+        assert res.description == [('i', 'bool', None, None, None, None, None), ('j', 'Time', None, None, None, None, None), ('k', 'STRING', None, None, None, None, None)]
 
     def test_result_timestamps(self, duckdb_cursor):
         connection = duckdb.connect('')
@@ -48,5 +48,10 @@ class TestPythonResult(object):
 
         rel = connection.table("intervals")
         res = rel.execute()
-        assert res.description() == [('ivals', 'TIMEDELTA', None, None, None, None, None)]
+        assert res.description == [('ivals', 'TIMEDELTA', None, None, None, None, None)]
         assert res.fetchall() == [(datetime.timedelta(days=1.0),), (datetime.timedelta(seconds=2.0),), (datetime.timedelta(microseconds=1.0),)]
+
+    def test_description_uuid(self):
+        connection = duckdb.connect()
+        connection.execute("select uuid();")
+        connection.description

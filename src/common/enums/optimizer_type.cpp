@@ -18,6 +18,7 @@ static DefaultOptimizerType internal_optimizer_types[] = {
     {"in_clause", OptimizerType::IN_CLAUSE},
     {"join_order", OptimizerType::JOIN_ORDER},
     {"deliminator", OptimizerType::DELIMINATOR},
+    {"unnest_rewriter", OptimizerType::UNNEST_REWRITER},
     {"unused_columns", OptimizerType::UNUSED_COLUMNS},
     {"statistics_propagation", OptimizerType::STATISTICS_PROPAGATION},
     {"common_subexpressions", OptimizerType::COMMON_SUBEXPRESSIONS},
@@ -25,6 +26,7 @@ static DefaultOptimizerType internal_optimizer_types[] = {
     {"column_lifetime", OptimizerType::COLUMN_LIFETIME},
     {"top_n", OptimizerType::TOP_N},
     {"reorder_filter", OptimizerType::REORDER_FILTER},
+    {"extension", OptimizerType::EXTENSION},
     {nullptr, OptimizerType::INVALID}};
 
 string OptimizerTypeToString(OptimizerType type) {

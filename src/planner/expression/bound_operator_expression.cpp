@@ -2,11 +2,12 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/parser/expression_util.hpp"
 #include "duckdb/parser/expression/operator_expression.hpp"
+#include "duckdb/common/field_writer.hpp"
 
 namespace duckdb {
 
 BoundOperatorExpression::BoundOperatorExpression(ExpressionType type, LogicalType return_type)
-    : Expression(type, ExpressionClass::BOUND_OPERATOR, move(return_type)) {
+    : Expression(type, ExpressionClass::BOUND_OPERATOR, std::move(return_type)) {
 }
 
 string BoundOperatorExpression::ToString() const {
@@ -30,7 +31,22 @@ unique_ptr<Expression> BoundOperatorExpression::Copy() {
 	for (auto &child : children) {
 		copy->children.push_back(child->Copy());
 	}
-	return move(copy);
+	return std::move(copy);
+}
+
+void BoundOperatorExpression::Serialize(FieldWriter &writer) const {
+	writer.WriteSerializable(return_type);
+	writer.WriteSerializableList(children);
+}
+
+unique_ptr<Expression> BoundOperatorExpression::Deserialize(ExpressionDeserializationState &state,
+                                                            FieldReader &reader) {
+	auto return_type = reader.ReadRequiredSerializable<LogicalType, LogicalType>();
+	auto children = reader.ReadRequiredSerializableList<Expression>(state.gstate);
+
+	auto result = make_unique<BoundOperatorExpression>(state.type, return_type);
+	result->children = std::move(children);
+	return std::move(result);
 }
 
 } // namespace duckdb

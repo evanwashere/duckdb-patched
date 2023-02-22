@@ -3,6 +3,7 @@
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
+#include "duckdb/planner/expression/bound_parameter_expression.hpp"
 #include "duckdb/planner/expression_binder.hpp"
 #include "duckdb/catalog/catalog_entry/collate_catalog_entry.hpp"
 #include "duckdb/common/string_util.hpp"
@@ -13,6 +14,7 @@
 
 #include "duckdb/main/config.hpp"
 #include "duckdb/catalog/catalog.hpp"
+#include "duckdb/function/function_binder.hpp"
 
 namespace duckdb {
 
@@ -21,7 +23,7 @@ unique_ptr<Expression> ExpressionBinder::PushCollation(ClientContext &context, u
 	// replace default collation with system collation
 	string collation;
 	if (collation_p.empty()) {
-		collation = DBConfig::GetConfig(context).collation;
+		collation = DBConfig::GetConfig(context).options.collation;
 	} else {
 		collation = collation_p;
 	}
@@ -31,7 +33,7 @@ unique_ptr<Expression> ExpressionBinder::PushCollation(ClientContext &context, u
 		// binary collation: just skip
 		return source;
 	}
-	auto &catalog = Catalog::GetCatalog(context);
+	auto &catalog = Catalog::GetSystemCatalog(context);
 	auto splits = StringUtil::Split(StringUtil::Lower(collation), ".");
 	vector<CollateCatalogEntry *> entries;
 	for (auto &collation_argument : splits) {
@@ -51,9 +53,11 @@ unique_ptr<Expression> ExpressionBinder::PushCollation(ClientContext &context, u
 			continue;
 		}
 		vector<unique_ptr<Expression>> children;
-		children.push_back(move(source));
-		auto function = ScalarFunction::BindScalarFunction(context, collation_entry->function, move(children));
-		source = move(function);
+		children.push_back(std::move(source));
+
+		FunctionBinder function_binder(context);
+		auto function = function_binder.BindScalarFunction(collation_entry->function, std::move(children));
+		source = std::move(function);
 	}
 	return source;
 }
@@ -123,18 +127,20 @@ BindResult ExpressionBinder::BindExpression(ComparisonExpression &expr, idx_t de
 	// now obtain the result type of the input types
 	auto input_type = BoundComparisonExpression::BindComparison(left_sql_type, right_sql_type);
 	// add casts (if necessary)
-	left.expr = BoundCastExpression::AddCastToType(move(left.expr), input_type, input_type.id() == LogicalTypeId::ENUM);
-	right.expr =
-	    BoundCastExpression::AddCastToType(move(right.expr), input_type, input_type.id() == LogicalTypeId::ENUM);
+	left.expr = BoundCastExpression::AddCastToType(context, std::move(left.expr), input_type,
+	                                               input_type.id() == LogicalTypeId::ENUM);
+	right.expr = BoundCastExpression::AddCastToType(context, std::move(right.expr), input_type,
+	                                                input_type.id() == LogicalTypeId::ENUM);
 
 	if (input_type.id() == LogicalTypeId::VARCHAR) {
 		// handle collation
 		auto collation = StringType::GetCollation(input_type);
-		left.expr = PushCollation(context, move(left.expr), collation, expr.type == ExpressionType::COMPARE_EQUAL);
-		right.expr = PushCollation(context, move(right.expr), collation, expr.type == ExpressionType::COMPARE_EQUAL);
+		left.expr = PushCollation(context, std::move(left.expr), collation, expr.type == ExpressionType::COMPARE_EQUAL);
+		right.expr =
+		    PushCollation(context, std::move(right.expr), collation, expr.type == ExpressionType::COMPARE_EQUAL);
 	}
 	// now create the bound comparison expression
-	return BindResult(make_unique<BoundComparisonExpression>(expr.type, move(left.expr), move(right.expr)));
+	return BindResult(make_unique<BoundComparisonExpression>(expr.type, std::move(left.expr), std::move(right.expr)));
 }
 
 } // namespace duckdb

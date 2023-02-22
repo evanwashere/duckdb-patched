@@ -19,7 +19,7 @@ static unique_ptr<Expression> ReplaceGroupBindings(LogicalAggregate &proj, uniqu
 		return proj.groups[colref.binding.column_index]->Copy();
 	}
 	ExpressionIterator::EnumerateChildren(
-	    *expr, [&](unique_ptr<Expression> &child) { child = ReplaceGroupBindings(proj, move(child)); });
+	    *expr, [&](unique_ptr<Expression> &child) { child = ReplaceGroupBindings(proj, std::move(child)); });
 	return expr;
 }
 
@@ -32,26 +32,40 @@ unique_ptr<LogicalOperator> FilterPushdown::PushdownAggregate(unique_ptr<Logical
 	FilterPushdown child_pushdown(optimizer);
 	for (idx_t i = 0; i < filters.size(); i++) {
 		auto &f = *filters[i];
-		// check if any aggregate or GROUPING functions are in the set
-		if (f.bindings.find(aggr.aggregate_index) == f.bindings.end() &&
-		    f.bindings.find(aggr.groupings_index) == f.bindings.end()) {
-			// no aggregate! we can push this down
-			// rewrite any group bindings within the filter
-			f.filter = ReplaceGroupBindings(aggr, move(f.filter));
-			// add the filter to the child node
-			if (child_pushdown.AddFilter(move(f.filter)) == FilterResult::UNSATISFIABLE) {
-				// filter statically evaluates to false, strip tree
-				return make_unique<LogicalEmptyResult>(move(op));
-			}
-			// erase the filter from here
-			filters.erase(filters.begin() + i);
-			i--;
+		if (f.bindings.find(aggr.aggregate_index) != f.bindings.end()) {
+			// filter on aggregate: cannot pushdown
+			continue;
 		}
+		if (f.bindings.find(aggr.groupings_index) != f.bindings.end()) {
+			// filter on GROUPINGS function: cannot pushdown
+			continue;
+		}
+		// if there are any empty grouping sets, we cannot push down filters
+		bool has_empty_grouping_sets = false;
+		for (auto &grp : aggr.grouping_sets) {
+			if (grp.empty()) {
+				has_empty_grouping_sets = true;
+			}
+		}
+		if (has_empty_grouping_sets) {
+			continue;
+		}
+		// no aggregate! we can push this down
+		// rewrite any group bindings within the filter
+		f.filter = ReplaceGroupBindings(aggr, std::move(f.filter));
+		// add the filter to the child node
+		if (child_pushdown.AddFilter(std::move(f.filter)) == FilterResult::UNSATISFIABLE) {
+			// filter statically evaluates to false, strip tree
+			return make_unique<LogicalEmptyResult>(std::move(op));
+		}
+		// erase the filter from here
+		filters.erase(filters.begin() + i);
+		i--;
 	}
 	child_pushdown.GenerateFilters();
 
-	op->children[0] = child_pushdown.Rewrite(move(op->children[0]));
-	return FinishPushdown(move(op));
+	op->children[0] = child_pushdown.Rewrite(std::move(op->children[0]));
+	return FinishPushdown(std::move(op));
 }
 
 } // namespace duckdb

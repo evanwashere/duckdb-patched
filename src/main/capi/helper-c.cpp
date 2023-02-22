@@ -1,4 +1,4 @@
-#include "duckdb/main/capi_internal.hpp"
+#include "duckdb/main/capi/capi_internal.hpp"
 
 namespace duckdb {
 
@@ -36,8 +36,6 @@ LogicalTypeId ConvertCTypeToCPP(duckdb_type c_type) {
 		return LogicalTypeId::TIME;
 	case DUCKDB_TYPE_VARCHAR:
 		return LogicalTypeId::VARCHAR;
-	case DUCKDB_TYPE_JSON:
-		return LogicalTypeId::JSON;
 	case DUCKDB_TYPE_BLOB:
 		return LogicalTypeId::BLOB;
 	case DUCKDB_TYPE_INTERVAL:
@@ -98,10 +96,10 @@ duckdb_type ConvertCPPTypeToC(const LogicalType &sql_type) {
 		return DUCKDB_TYPE_TIME;
 	case LogicalTypeId::VARCHAR:
 		return DUCKDB_TYPE_VARCHAR;
-	case LogicalTypeId::JSON:
-		return DUCKDB_TYPE_JSON;
 	case LogicalTypeId::BLOB:
 		return DUCKDB_TYPE_BLOB;
+	case LogicalTypeId::BIT:
+		return DUCKDB_TYPE_BIT;
 	case LogicalTypeId::INTERVAL:
 		return DUCKDB_TYPE_INTERVAL;
 	case LogicalTypeId::DECIMAL:
@@ -114,6 +112,8 @@ duckdb_type ConvertCPPTypeToC(const LogicalType &sql_type) {
 		return DUCKDB_TYPE_STRUCT;
 	case LogicalTypeId::MAP:
 		return DUCKDB_TYPE_MAP;
+	case LogicalTypeId::UNION:
+		return DUCKDB_TYPE_UNION;
 	case LogicalTypeId::UUID:
 		return DUCKDB_TYPE_UUID;
 	default: // LCOV_EXCL_START

@@ -17,6 +17,10 @@ static bool IsStreamingWindow(unique_ptr<Expression> &expr) {
 	}
 	switch (wexpr->type) {
 	// TODO: add more expression types here?
+	case ExpressionType::WINDOW_AGGREGATE:
+		// We can stream aggregates if they are "running totals" and don't use filters
+		return wexpr->start == WindowBoundary::UNBOUNDED_PRECEDING && wexpr->end == WindowBoundary::CURRENT_ROW_ROWS &&
+		       !wexpr->filter_expr;
 	case ExpressionType::WINDOW_FIRST_VALUE:
 	case ExpressionType::WINDOW_PERCENT_RANK:
 	case ExpressionType::WINDOW_RANK:
@@ -37,6 +41,8 @@ unique_ptr<PhysicalOperator> PhysicalPlanGenerator::CreatePlan(LogicalWindow &op
 		D_ASSERT(expr->IsWindow());
 	}
 #endif
+
+	op.estimated_cardinality = op.EstimateCardinality(context);
 
 	// Slice types
 	auto types = op.types;
@@ -80,22 +86,22 @@ unique_ptr<PhysicalOperator> PhysicalPlanGenerator::CreatePlan(LogicalWindow &op
 		// Extract the matching expressions
 		vector<unique_ptr<Expression>> select_list;
 		for (const auto &expr_idx : matching) {
-			select_list.emplace_back(move(op.expressions[expr_idx]));
+			select_list.emplace_back(std::move(op.expressions[expr_idx]));
 			types.emplace_back(op.types[output_idx + expr_idx]);
 		}
 
 		// Chain the new window operator on top of the plan
 		unique_ptr<PhysicalOperator> window;
 		if (process_streaming) {
-			window = make_unique<PhysicalStreamingWindow>(types, move(select_list), op.estimated_cardinality);
+			window = make_unique<PhysicalStreamingWindow>(types, std::move(select_list), op.estimated_cardinality);
 		} else {
-			window = make_unique<PhysicalWindow>(types, move(select_list), op.estimated_cardinality);
+			window = make_unique<PhysicalWindow>(types, std::move(select_list), op.estimated_cardinality);
 		}
-		window->children.push_back(move(plan));
-		plan = move(window);
+		window->children.push_back(std::move(plan));
+		plan = std::move(window);
 
 		// Remember the projection order if we changed it
-		if (!remaining.empty() || !evaluation_order.empty()) {
+		if (!streaming_windows.empty() || !blocking_windows.empty() || !evaluation_order.empty()) {
 			evaluation_order.insert(evaluation_order.end(), matching.begin(), matching.end());
 		}
 	}
@@ -112,9 +118,9 @@ unique_ptr<PhysicalOperator> PhysicalPlanGenerator::CreatePlan(LogicalWindow &op
 			const auto expr_idx = evaluation_order[i] + output_idx;
 			select_list[expr_idx] = make_unique<BoundReferenceExpression>(op.types[expr_idx], i + output_idx);
 		}
-		auto proj = make_unique<PhysicalProjection>(op.types, move(select_list), op.estimated_cardinality);
-		proj->children.push_back(move(plan));
-		plan = move(proj);
+		auto proj = make_unique<PhysicalProjection>(op.types, std::move(select_list), op.estimated_cardinality);
+		proj->children.push_back(std::move(plan));
+		plan = std::move(proj);
 	}
 
 	return plan;

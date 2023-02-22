@@ -1,20 +1,19 @@
 #include "duckdb/planner/bind_context.hpp"
 
-#include "duckdb/parser/expression/columnref_expression.hpp"
-#include "duckdb/parser/expression/positional_reference_expression.hpp"
-#include "duckdb/parser/tableref/subqueryref.hpp"
-#include "duckdb/parser/tableref/table_function_ref.hpp"
-#include "duckdb/planner/expression/bound_columnref_expression.hpp"
-#include "duckdb/planner/bound_query_node.hpp"
-
-#include "duckdb/parser/expression/operator_expression.hpp"
-#include "duckdb/parser/expression/star_expression.hpp"
-#include "duckdb/parser/parsed_expression_iterator.hpp"
-
-#include "duckdb/common/string_util.hpp"
-#include "duckdb/common/pair.hpp"
 #include "duckdb/catalog/catalog_entry/table_column_type.hpp"
 #include "duckdb/catalog/standard_entry.hpp"
+#include "duckdb/common/pair.hpp"
+#include "duckdb/common/string_util.hpp"
+#include "duckdb/parser/expression/columnref_expression.hpp"
+#include "duckdb/parser/expression/operator_expression.hpp"
+#include "duckdb/parser/expression/positional_reference_expression.hpp"
+#include "duckdb/parser/expression/star_expression.hpp"
+#include "duckdb/parser/tableref/subqueryref.hpp"
+#include "duckdb/parser/tableref/table_function_ref.hpp"
+#include "duckdb/planner/bound_query_node.hpp"
+#include "duckdb/planner/expression/bound_columnref_expression.hpp"
+#include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
+#include "re2/re2.h"
 
 #include <algorithm>
 
@@ -57,7 +56,7 @@ void BindContext::AddUsingBinding(const string &column_name, UsingColumnSet *set
 }
 
 void BindContext::AddUsingBindingSet(unique_ptr<UsingColumnSet> set) {
-	using_column_sets.push_back(move(set));
+	using_column_sets.push_back(std::move(set));
 }
 
 bool BindContext::FindUsingBinding(const string &column_name, unordered_set<UsingColumnSet *> **out) {
@@ -169,7 +168,9 @@ unique_ptr<ParsedExpression> BindContext::ExpandGeneratedColumn(const string &ta
 	auto binding = GetBinding(table_name, error_message);
 	D_ASSERT(binding);
 	auto &table_binding = *(TableBinding *)binding;
-	return table_binding.ExpandGeneratedColumn(column_name);
+	auto result = table_binding.ExpandGeneratedColumn(column_name);
+	result->alias = column_name;
+	return result;
 }
 
 unique_ptr<ParsedExpression> BindContext::CreateColumnReference(const string &table_name, const string &column_name) {
@@ -191,24 +192,26 @@ static bool ColumnIsGenerated(Binding *binding, column_t index) {
 	}
 	D_ASSERT(catalog_entry->type == CatalogType::TABLE_ENTRY);
 	auto table_entry = (TableCatalogEntry *)catalog_entry;
-	D_ASSERT(table_entry->columns.size() >= index);
-	return table_entry->columns[index].Generated();
+	return table_entry->GetColumn(LogicalIndex(index)).Generated();
 }
 
-unique_ptr<ParsedExpression> BindContext::CreateColumnReference(const string &schema_name, const string &table_name,
-                                                                const string &column_name) {
+unique_ptr<ParsedExpression> BindContext::CreateColumnReference(const string &catalog_name, const string &schema_name,
+                                                                const string &table_name, const string &column_name) {
 	string error_message;
 	vector<string> names;
+	if (!catalog_name.empty()) {
+		names.push_back(catalog_name);
+	}
 	if (!schema_name.empty()) {
 		names.push_back(schema_name);
 	}
 	names.push_back(table_name);
 	names.push_back(column_name);
 
-	auto result = make_unique<ColumnRefExpression>(move(names));
+	auto result = make_unique<ColumnRefExpression>(std::move(names));
 	auto binding = GetBinding(table_name, error_message);
 	if (!binding) {
-		return move(result);
+		return std::move(result);
 	}
 	auto column_index = binding->GetBindingIndex(column_name);
 	if (ColumnIsGenerated(binding, column_index)) {
@@ -218,7 +221,13 @@ unique_ptr<ParsedExpression> BindContext::CreateColumnReference(const string &sc
 		// as it appears in the binding itself
 		result->alias = binding->names[column_index];
 	}
-	return move(result);
+	return std::move(result);
+}
+
+unique_ptr<ParsedExpression> BindContext::CreateColumnReference(const string &schema_name, const string &table_name,
+                                                                const string &column_name) {
+	string catalog_name;
+	return CreateColumnReference(catalog_name, schema_name, table_name, column_name);
 }
 
 Binding *BindContext::GetCTEBinding(const string &ctename) {
@@ -304,10 +313,17 @@ bool BindContext::CheckExclusionList(StarExpression &expr, Binding *binding, con
 		auto new_entry = entry->second->Copy();
 		new_entry->alias = entry->first;
 		excluded_columns.insert(entry->first);
-		new_select_list.push_back(move(new_entry));
+		new_select_list.push_back(std::move(new_entry));
 		return true;
 	}
 	return false;
+}
+
+bool CheckRegex(const string &column_name, duckdb_re2::RE2 *regex) {
+	if (!regex) {
+		return true;
+	}
+	return RE2::PartialMatch(column_name, *regex);
 }
 
 void BindContext::GenerateAllColumnExpressions(StarExpression &expr,
@@ -319,6 +335,15 @@ void BindContext::GenerateAllColumnExpressions(StarExpression &expr,
 	if (expr.relation_name.empty()) {
 		// SELECT * case
 		// bind all expressions of each table in-order
+		unique_ptr<duckdb_re2::RE2> regex;
+		bool found_match = true;
+		if (!expr.regex.empty()) {
+			regex = make_unique<duckdb_re2::RE2>(expr.regex);
+			if (!regex->error().empty()) {
+				throw BinderException("Failed to compile regex \"%s\": %s", expr.regex, regex->error());
+			}
+			found_match = false;
+		}
 		unordered_set<UsingColumnSet *> handled_using_columns;
 		for (auto &entry : bindings_list) {
 			auto binding = entry.second;
@@ -326,6 +351,10 @@ void BindContext::GenerateAllColumnExpressions(StarExpression &expr,
 				if (CheckExclusionList(expr, binding, column_name, new_select_list, excluded_columns)) {
 					continue;
 				}
+				if (!CheckRegex(column_name, regex.get())) {
+					continue;
+				}
+				found_match = true;
 				// check if this column is a USING column
 				auto using_binding = GetUsingBinding(column_name, binding->alias);
 				if (using_binding) {
@@ -343,7 +372,7 @@ void BindContext::GenerateAllColumnExpressions(StarExpression &expr,
 							coalesce->children.push_back(make_unique<ColumnRefExpression>(column_name, child_binding));
 						}
 						coalesce->alias = column_name;
-						new_select_list.push_back(move(coalesce));
+						new_select_list.push_back(std::move(coalesce));
 					} else {
 						// primary binding: output the qualified column ref
 						new_select_list.push_back(
@@ -355,18 +384,50 @@ void BindContext::GenerateAllColumnExpressions(StarExpression &expr,
 				new_select_list.push_back(make_unique<ColumnRefExpression>(column_name, binding->alias));
 			}
 		}
+		if (!found_match) {
+			throw BinderException("No matching columns found that match regex \"%s\"", expr.regex);
+		}
 	} else {
 		// SELECT tbl.* case
+		// SELECT struct.* case
 		string error;
 		auto binding = GetBinding(expr.relation_name, error);
+		bool is_struct_ref = false;
 		if (!binding) {
-			throw BinderException(error);
-		}
-		for (auto &column_name : binding->names) {
-			if (CheckExclusionList(expr, binding, column_name, new_select_list, excluded_columns)) {
-				continue;
+			auto binding_name = GetMatchingBinding(expr.relation_name);
+			if (binding_name.empty()) {
+				throw BinderException(error);
 			}
-			new_select_list.push_back(make_unique<ColumnRefExpression>(column_name, binding->alias));
+			binding = bindings[binding_name].get();
+			is_struct_ref = true;
+		}
+
+		if (is_struct_ref) {
+			auto col_idx = binding->GetBindingIndex(expr.relation_name);
+			auto col_type = binding->types[col_idx];
+			if (col_type.id() != LogicalTypeId::STRUCT) {
+				throw BinderException(StringUtil::Format(
+				    "Cannot extract field from expression \"%s\" because it is not a struct", expr.ToString()));
+			}
+			auto &struct_children = StructType::GetChildTypes(col_type);
+			vector<string> column_names(3);
+			column_names[0] = binding->alias;
+			column_names[1] = expr.relation_name;
+			for (auto &child : struct_children) {
+				if (CheckExclusionList(expr, binding, child.first, new_select_list, excluded_columns)) {
+					continue;
+				}
+				column_names[2] = child.first;
+				new_select_list.push_back(make_unique<ColumnRefExpression>(column_names));
+			}
+		} else {
+			for (auto &column_name : binding->names) {
+				if (CheckExclusionList(expr, binding, column_name, new_select_list, excluded_columns)) {
+					continue;
+				}
+
+				new_select_list.push_back(make_unique<ColumnRefExpression>(column_name, binding->alias));
+			}
 		}
 	}
 	for (auto &excluded : expr.exclude_list) {
@@ -388,24 +449,26 @@ void BindContext::AddBinding(const string &alias, unique_ptr<Binding> binding) {
 		throw BinderException("Duplicate alias \"%s\" in query!", alias);
 	}
 	bindings_list.emplace_back(alias, binding.get());
-	bindings[alias] = move(binding);
+	bindings[alias] = std::move(binding);
 }
 
 void BindContext::AddBaseTable(idx_t index, const string &alias, const vector<string> &names,
-                               const vector<LogicalType> &types, LogicalGet &get) {
-	AddBinding(alias, make_unique<TableBinding>(alias, types, names, get, index, true));
+                               const vector<LogicalType> &types, vector<column_t> &bound_column_ids,
+                               StandardEntry *entry, bool add_row_id) {
+	AddBinding(alias, make_unique<TableBinding>(alias, types, names, bound_column_ids, entry, index, add_row_id));
 }
 
 void BindContext::AddTableFunction(idx_t index, const string &alias, const vector<string> &names,
-                                   const vector<LogicalType> &types, LogicalGet &get) {
-	AddBinding(alias, make_unique<TableBinding>(alias, types, names, get, index));
+                                   const vector<LogicalType> &types, vector<column_t> &bound_column_ids,
+                                   StandardEntry *entry) {
+	AddBinding(alias, make_unique<TableBinding>(alias, types, names, bound_column_ids, entry, index));
 }
 
 static string AddColumnNameToBinding(const string &base_name, case_insensitive_set_t &current_names) {
 	idx_t index = 1;
 	string name = base_name;
 	while (current_names.find(name) != current_names.end()) {
-		name = base_name + ":" + to_string(index++);
+		name = base_name + ":" + std::to_string(index++);
 	}
 	current_names.insert(name);
 	return name;
@@ -464,7 +527,7 @@ void BindContext::AddCTEBinding(idx_t index, const string &alias, const vector<s
 	if (cte_bindings.find(alias) != cte_bindings.end()) {
 		throw BinderException("Duplicate alias \"%s\" in query!", alias);
 	}
-	cte_bindings[alias] = move(binding);
+	cte_bindings[alias] = std::move(binding);
 	cte_references[alias] = std::make_shared<idx_t>(0);
 }
 
@@ -473,10 +536,10 @@ void BindContext::AddContext(BindContext other) {
 		if (bindings.find(binding.first) != bindings.end()) {
 			throw BinderException("Duplicate alias \"%s\" in query!", binding.first);
 		}
-		bindings[binding.first] = move(binding.second);
+		bindings[binding.first] = std::move(binding.second);
 	}
 	for (auto &binding : other.bindings_list) {
-		bindings_list.push_back(move(binding));
+		bindings_list.push_back(std::move(binding));
 	}
 	for (auto &entry : other.using_columns) {
 		for (auto &alias : entry.second) {

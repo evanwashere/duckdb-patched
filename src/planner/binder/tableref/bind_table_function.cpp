@@ -10,37 +10,43 @@
 #include "duckdb/parser/tableref/emptytableref.hpp"
 #include "duckdb/parser/tableref/table_function_ref.hpp"
 #include "duckdb/planner/binder.hpp"
-#include "duckdb/planner/expression_binder/constant_binder.hpp"
+#include "duckdb/planner/expression_binder/table_function_binder.hpp"
 #include "duckdb/planner/expression_binder/select_binder.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/planner/query_node/bound_select_node.hpp"
 #include "duckdb/planner/tableref/bound_subqueryref.hpp"
 #include "duckdb/planner/tableref/bound_table_function.hpp"
+#include "duckdb/function/function_binder.hpp"
+#include "duckdb/catalog/catalog_entry/table_function_catalog_entry.hpp"
+#include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 
 namespace duckdb {
 
 static bool IsTableInTableOutFunction(TableFunctionCatalogEntry &table_function) {
-	return table_function.functions.size() == 1 && table_function.functions[0].arguments.size() == 1 &&
-	       table_function.functions[0].arguments[0].id() == LogicalTypeId::TABLE;
+	auto fun = table_function.functions.GetFunctionByOffset(0);
+	return table_function.functions.Size() == 1 && fun.arguments.size() == 1 &&
+	       fun.arguments[0].id() == LogicalTypeId::TABLE;
 }
 
 bool Binder::BindTableInTableOutFunction(vector<unique_ptr<ParsedExpression>> &expressions,
                                          unique_ptr<BoundSubqueryRef> &subquery, string &error) {
 	auto binder = Binder::CreateBinder(this->context, this, true);
+	unique_ptr<QueryNode> subquery_node;
 	if (expressions.size() == 1 && expressions[0]->type == ExpressionType::SUBQUERY) {
 		// general case: argument is a subquery, bind it as part of the node
 		auto &se = (SubqueryExpression &)*expressions[0];
-		auto node = binder->BindNode(*se.subquery->node);
-		subquery = make_unique<BoundSubqueryRef>(move(binder), move(node));
-		return true;
+		subquery_node = std::move(se.subquery->node);
+	} else {
+		// special case: non-subquery parameter to table-in table-out function
+		// generate a subquery and bind that (i.e. UNNEST([1,2,3]) becomes UNNEST((SELECT [1,2,3]))
+		auto select_node = make_unique<SelectNode>();
+		select_node->select_list = std::move(expressions);
+		select_node->from_table = make_unique<EmptyTableRef>();
+		subquery_node = std::move(select_node);
 	}
-	// special case: non-subquery parameter to table-in table-out function
-	// generate a subquery and bind that (i.e. UNNEST([1,2,3]) becomes UNNEST((SELECT [1,2,3]))
-	auto select_node = make_unique<SelectNode>();
-	select_node->select_list = move(expressions);
-	select_node->from_table = make_unique<EmptyTableRef>();
-	auto node = binder->BindNode(*select_node);
-	subquery = make_unique<BoundSubqueryRef>(move(binder), move(node));
+	auto node = binder->BindNode(*subquery_node);
+	subquery = make_unique<BoundSubqueryRef>(std::move(binder), std::move(node));
+	MoveCorrelatedExpressions(*subquery->binder);
 	return true;
 }
 
@@ -66,7 +72,7 @@ bool Binder::BindTableFunctionParameters(TableFunctionCatalogEntry &table_functi
 				auto &colref = (ColumnRefExpression &)*comp.left;
 				if (!colref.IsQualified()) {
 					parameter_name = colref.GetColumnName();
-					child = move(comp.right);
+					child = std::move(comp.right);
 				}
 			}
 		}
@@ -78,20 +84,23 @@ bool Binder::BindTableFunctionParameters(TableFunctionCatalogEntry &table_functi
 			auto binder = Binder::CreateBinder(this->context, this, true);
 			auto &se = (SubqueryExpression &)*child;
 			auto node = binder->BindNode(*se.subquery->node);
-			subquery = make_unique<BoundSubqueryRef>(move(binder), move(node));
+			subquery = make_unique<BoundSubqueryRef>(std::move(binder), std::move(node));
 			seen_subquery = true;
 			arguments.emplace_back(LogicalTypeId::TABLE);
 			continue;
 		}
 
-		ConstantBinder binder(*this, context, "TABLE FUNCTION parameter");
+		TableFunctionBinder binder(*this, context);
 		LogicalType sql_type;
 		auto expr = binder.Bind(child, &sql_type);
-		if (!expr->IsFoldable()) {
+		if (expr->HasParameter()) {
+			throw ParameterNotResolvedException();
+		}
+		if (!expr->IsScalar()) {
 			error = "Table function requires a constant parameter";
 			return false;
 		}
-		auto constant = ExpressionExecutor::EvaluateScalar(*expr);
+		auto constant = ExpressionExecutor::EvaluateScalar(context, *expr, true);
 		if (parameter_name.empty()) {
 			// unnamed parameter
 			if (!named_parameters.empty()) {
@@ -99,9 +108,9 @@ bool Binder::BindTableFunctionParameters(TableFunctionCatalogEntry &table_functi
 				return false;
 			}
 			arguments.emplace_back(sql_type);
-			parameters.emplace_back(move(constant));
+			parameters.emplace_back(std::move(constant));
 		} else {
-			named_parameters[parameter_name] = move(constant);
+			named_parameters[parameter_name] = std::move(constant);
 		}
 	}
 	return true;
@@ -123,7 +132,7 @@ Binder::BindTableFunctionInternal(TableFunction &table_function, const string &f
 		bind_data = table_function.bind(context, bind_input, return_types, return_names);
 		if (table_function.name == "pandas_scan" || table_function.name == "arrow_scan") {
 			auto arrow_bind = (PyTableFunctionData *)bind_data.get();
-			arrow_bind->external_dependency = move(external_dependency);
+			arrow_bind->external_dependency = std::move(external_dependency);
 		}
 	}
 	if (return_types.size() != return_names.size()) {
@@ -144,10 +153,21 @@ Binder::BindTableFunctionInternal(TableFunction &table_function, const string &f
 			return_names[i] = "C" + to_string(i);
 		}
 	}
-	auto get = make_unique<LogicalGet>(bind_index, table_function, move(bind_data), return_types, return_names);
+	auto get = make_unique<LogicalGet>(bind_index, table_function, std::move(bind_data), return_types, return_names);
+	get->parameters = parameters;
+	get->named_parameters = named_parameters;
+	get->input_table_types = input_table_types;
+	get->input_table_names = input_table_names;
+	if (table_function.in_out_function && !table_function.projection_pushdown) {
+		get->column_ids.reserve(return_types.size());
+		for (idx_t i = 0; i < return_types.size(); i++) {
+			get->column_ids.push_back(i);
+		}
+	}
 	// now add the table function to the bind context so its columns can be bound
-	bind_context.AddTableFunction(bind_index, function_name, return_names, return_types, *get);
-	return move(get);
+	bind_context.AddTableFunction(bind_index, function_name, return_names, return_types, get->column_ids,
+	                              get->GetTable());
+	return std::move(get);
 }
 
 unique_ptr<LogicalOperator> Binder::BindTableFunction(TableFunction &function, vector<Value> parameters) {
@@ -155,8 +175,9 @@ unique_ptr<LogicalOperator> Binder::BindTableFunction(TableFunction &function, v
 	vector<LogicalType> input_table_types;
 	vector<string> input_table_names;
 	vector<string> column_name_aliases;
-	return BindTableFunctionInternal(function, function.name, move(parameters), move(named_parameters),
-	                                 move(input_table_types), move(input_table_names), column_name_aliases, nullptr);
+	return BindTableFunctionInternal(function, function.name, std::move(parameters), std::move(named_parameters),
+	                                 std::move(input_table_types), std::move(input_table_names), column_name_aliases,
+	                                 nullptr);
 }
 
 unique_ptr<BoundTableRef> Binder::Bind(TableFunctionRef &ref) {
@@ -168,10 +189,8 @@ unique_ptr<BoundTableRef> Binder::Bind(TableFunctionRef &ref) {
 	TableFunctionCatalogEntry *function = nullptr;
 
 	// fetch the function from the catalog
-	auto &catalog = Catalog::GetCatalog(context);
-
-	auto func_catalog = catalog.GetEntry(context, CatalogType::TABLE_FUNCTION_ENTRY, fexpr->schema,
-	                                     fexpr->function_name, false, error_context);
+	auto func_catalog = Catalog::GetEntry(context, CatalogType::TABLE_FUNCTION_ENTRY, fexpr->catalog, fexpr->schema,
+	                                      fexpr->function_name, false, error_context);
 
 	if (func_catalog->type == CatalogType::TABLE_FUNCTION_ENTRY) {
 		function = (TableFunctionCatalogEntry *)func_catalog;
@@ -190,11 +209,11 @@ unique_ptr<BoundTableRef> Binder::Bind(TableFunctionRef &ref) {
 		// string alias;
 		string alias = (ref.alias.empty() ? "unnamed_query" + to_string(bind_index) : ref.alias);
 
-		auto result = make_unique<BoundSubqueryRef>(move(binder), move(query));
+		auto result = make_unique<BoundSubqueryRef>(std::move(binder), std::move(query));
 		// remember ref here is TableFunctionRef and NOT base class
 		bind_context.AddSubquery(bind_index, alias, ref, *result->subquery);
 		MoveCorrelatedExpressions(*result->binder);
-		return move(result);
+		return std::move(result);
 	}
 
 	// evaluate the input parameters to the function
@@ -209,11 +228,12 @@ unique_ptr<BoundTableRef> Binder::Bind(TableFunctionRef &ref) {
 	}
 
 	// select the function based on the input parameters
-	idx_t best_function_idx = Function::BindFunction(function->name, function->functions, arguments, error);
+	FunctionBinder function_binder(context);
+	idx_t best_function_idx = function_binder.BindFunction(function->name, function->functions, arguments, error);
 	if (best_function_idx == DConstants::INVALID_INDEX) {
 		throw BinderException(FormatError(ref, error));
 	}
-	auto &table_function = function->functions[best_function_idx];
+	auto table_function = function->functions.GetFunctionByOffset(best_function_idx);
 
 	// now check the named parameters
 	BindNamedParameters(table_function.named_parameters, named_parameters, error_context, table_function.name);
@@ -223,7 +243,7 @@ unique_ptr<BoundTableRef> Binder::Bind(TableFunctionRef &ref) {
 		if (table_function.arguments[i] != LogicalType::ANY && table_function.arguments[i] != LogicalType::TABLE &&
 		    table_function.arguments[i] != LogicalType::POINTER &&
 		    table_function.arguments[i].id() != LogicalTypeId::LIST) {
-			parameters[i] = parameters[i].CastAs(table_function.arguments[i]);
+			parameters[i] = parameters[i].CastAs(context, table_function.arguments[i]);
 		}
 	}
 
@@ -235,13 +255,14 @@ unique_ptr<BoundTableRef> Binder::Bind(TableFunctionRef &ref) {
 		input_table_names = subquery->subquery->names;
 	}
 	auto get = BindTableFunctionInternal(table_function, ref.alias.empty() ? fexpr->function_name : ref.alias,
-	                                     move(parameters), move(named_parameters), move(input_table_types),
-	                                     move(input_table_names), ref.column_name_alias, move(ref.external_dependency));
+	                                     std::move(parameters), std::move(named_parameters),
+	                                     std::move(input_table_types), std::move(input_table_names),
+	                                     ref.column_name_alias, std::move(ref.external_dependency));
 	if (subquery) {
 		get->children.push_back(Binder::CreatePlan(*subquery));
 	}
 
-	return make_unique_base<BoundTableRef, BoundTableFunction>(move(get));
+	return make_unique_base<BoundTableRef, BoundTableFunction>(std::move(get));
 }
 
 } // namespace duckdb

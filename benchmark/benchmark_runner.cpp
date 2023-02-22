@@ -55,36 +55,6 @@ void BenchmarkRunner::InitializeBenchmarkDirectory() {
 	}
 }
 
-void BenchmarkRunner::SaveDatabase(DuckDB &db, string name) {
-	InitializeBenchmarkDirectory();
-
-	auto &fs = db.GetFileSystem();
-	Connection con(db);
-	auto result = con.Query(
-	    StringUtil::Format("EXPORT DATABASE '%s' (FORMAT CSV)", fs.JoinPath(DUCKDB_BENCHMARK_DIRECTORY, name)));
-	if (!result->success) {
-		throw Exception("Failed to save database: " + result->error);
-	}
-}
-
-bool BenchmarkRunner::TryLoadDatabase(DuckDB &db, string name) {
-	auto &fs = db.GetFileSystem();
-	if (!fs.DirectoryExists(DUCKDB_BENCHMARK_DIRECTORY)) {
-		return false;
-	}
-	string base_dir = fs.JoinPath(DUCKDB_BENCHMARK_DIRECTORY, name);
-	// check if the [name]/schema.sql file exists
-	if (!fs.FileExists(fs.JoinPath(base_dir, "schema.sql"))) {
-		return false;
-	}
-	Connection con(db);
-	auto result = con.Query(StringUtil::Format("IMPORT DATABASE '%s'", base_dir));
-	if (!result->success) {
-		throw Exception("Failed to load database: " + result->error);
-	}
-	return true;
-}
-
 atomic<bool> is_active;
 atomic<bool> timeout;
 
@@ -130,9 +100,7 @@ void BenchmarkRunner::LogOutput(string message) {
 void BenchmarkRunner::RunBenchmark(Benchmark *benchmark) {
 	Profiler profiler;
 	auto display_name = benchmark->DisplayName();
-	// LogLine(string(display_name.size() + 6, '-'));
-	// LogLine("|| " + display_name + " ||");
-	// LogLine(string(display_name.size() + 6, '-'));
+
 	auto state = benchmark->Initialize(configuration);
 	auto nruns = benchmark->NRuns();
 	for (size_t i = 0; i < nruns + 1; i++) {
@@ -150,8 +118,6 @@ void BenchmarkRunner::RunBenchmark(Benchmark *benchmark) {
 		profiler.Start();
 		benchmark->Run(state.get());
 		profiler.End();
-
-		benchmark->Cleanup(state.get());
 
 		is_active = false;
 		interrupt_thread.join();
@@ -174,6 +140,7 @@ void BenchmarkRunner::RunBenchmark(Benchmark *benchmark) {
 				}
 			}
 		}
+		benchmark->Cleanup(state.get());
 	}
 	benchmark->Finalize();
 }
@@ -240,7 +207,7 @@ void parse_arguments(const int arg_counter, char const *const *arg_values) {
 		} else if (StringUtil::StartsWith(arg, "--threads=")) {
 			// write info of benchmark
 			auto splits = StringUtil::Split(arg, '=');
-			instance.threads = Value(splits[1]).CastAs(LogicalType::UINTEGER).GetValue<uint32_t>();
+			instance.threads = Value(splits[1]).DefaultCastAs(LogicalType::UINTEGER).GetValue<uint32_t>();
 		} else if (arg == "--query") {
 			// write group of benchmark
 			instance.configuration.meta = BenchmarkMetaType::QUERY;

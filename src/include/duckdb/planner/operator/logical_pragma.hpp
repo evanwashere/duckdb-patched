@@ -18,13 +18,19 @@ namespace duckdb {
 class LogicalPragma : public LogicalOperator {
 public:
 	LogicalPragma(PragmaFunction function_p, PragmaInfo info_p)
-	    : LogicalOperator(LogicalOperatorType::LOGICAL_PRAGMA), function(move(function_p)), info(move(info_p)) {
+	    : LogicalOperator(LogicalOperatorType::LOGICAL_PRAGMA), function(std::move(function_p)),
+	      info(std::move(info_p)) {
 	}
 
 	//! The pragma function to call
 	PragmaFunction function;
 	//! The context of the call
 	PragmaInfo info;
+
+public:
+	void Serialize(FieldWriter &writer) const override;
+	static unique_ptr<LogicalOperator> Deserialize(LogicalDeserializationState &state, FieldReader &reader);
+	idx_t EstimateCardinality(ClientContext &context) override;
 
 protected:
 	void ResolveTypes() override {

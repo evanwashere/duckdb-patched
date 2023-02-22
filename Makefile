@@ -1,9 +1,8 @@
-.PHONY: all opt unit clean debug release release_expanded test unittest allunit benchmark docs doxygen format sqlite imdb
+.PHONY: all opt unit clean debug release test unittest allunit benchmark docs doxygen format sqlite
 
 all: release
 opt: release
 unit: unittest
-imdb: third_party/imdb/data
 
 GENERATOR=
 FORCE_COLOR=
@@ -13,6 +12,7 @@ DISABLE_UNITY_FLAG=
 DISABLE_SANITIZER_FLAG=
 OSX_BUILD_UNIVERSAL_FLAG=
 FORCE_32_BIT_FLAG=
+
 ifeq ($(GEN),ninja)
 	GENERATOR=-G "Ninja"
 	FORCE_COLOR=-DFORCE_COLORED_OUTPUT=1
@@ -87,8 +87,14 @@ endif
 ifeq (${BUILD_JSON}, 1)
 	EXTENSIONS:=${EXTENSIONS} -DBUILD_JSON_EXTENSION=1
 endif
+ifeq (${BUILD_JEMALLOC}, 1)
+	EXTENSIONS:=${EXTENSIONS} -DBUILD_JEMALLOC_EXTENSION=1
+endif
 ifeq (${BUILD_EXCEL}, 1)
 	EXTENSIONS:=${EXTENSIONS} -DBUILD_EXCEL_EXTENSION=1
+endif
+ifeq (${BUILD_INET}, 1)
+	EXTENSIONS:=${EXTENSIONS} -DBUILD_INET_EXTENSION=1
 endif
 ifeq (${STATIC_OPENSSL}, 1)
 	EXTENSIONS:=${EXTENSIONS} -DOPENSSL_USE_STATIC_LIBS=1
@@ -99,26 +105,32 @@ endif
 ifeq (${BUILD_TPCE}, 1)
 	EXTENSIONS:=${EXTENSIONS} -DBUILD_TPCE=1
 endif
-ifeq (${BUILD_SUBSTRAIT_EXTENSION}, 1)
-	EXTENSIONS:=${EXTENSIONS} -DBUILD_SUBSTRAIT_EXTENSION=1
-endif
 ifeq (${BUILD_JDBC}, 1)
 	EXTENSIONS:=${EXTENSIONS} -DJDBC_DRIVER=1
+endif
+ifneq ($(OVERRIDE_JDBC_OS_ARCH),)
+	EXTENSIONS:=${EXTENSIONS} -DOVERRIDE_JDBC_OS_ARCH=$(OVERRIDE_JDBC_OS_ARCH)
 endif
 ifeq (${BUILD_ODBC}, 1)
 	EXTENSIONS:=${EXTENSIONS} -DBUILD_ODBC_DRIVER=1
 endif
+ifneq ($(ODBC_CONFIG),)
+	EXTENSIONS:=${EXTENSIONS} -DODBC_CONFIG=${ODBC_CONFIG}
+endif
 ifeq (${BUILD_PYTHON}, 1)
-	EXTENSIONS:=${EXTENSIONS} -DBUILD_PYTHON=1 -DBUILD_JSON_EXTENSION=1 -DBUILD_FTS_EXTENSION=1 -DBUILD_TPCH_EXTENSION=1 -DBUILD_VISUALIZER_EXTENSION=1 -DBUILD_TPCDS_EXTENSION=1 -DBUILD_SUBSTRAIT_EXTENSION=1
+	EXTENSIONS:=${EXTENSIONS} -DBUILD_PYTHON=1 -DBUILD_JSON_EXTENSION=1 -DBUILD_FTS_EXTENSION=1 -DBUILD_TPCH_EXTENSION=1 -DBUILD_VISUALIZER_EXTENSION=1 -DBUILD_TPCDS_EXTENSION=1
+endif
+ifeq (${PYTHON_USER_SPACE}, 1)
+	EXTENSIONS:=${EXTENSIONS} -DUSER_SPACE=1
 endif
 ifeq (${BUILD_R}, 1)
 	EXTENSIONS:=${EXTENSIONS} -DBUILD_R=1
 endif
+ifeq (${BUILD_NODE}, 1)
+	EXTENSIONS:=${EXTENSIONS} -DBUILD_NODE=1 -DBUILD_JSON_EXTENSION=1
+endif
 ifeq (${CONFIGURE_R}, 1)
 	EXTENSIONS:=${EXTENSIONS} -DCONFIGURE_R=1
-endif
-ifeq (${BUILD_REST}, 1)
-	EXTENSIONS:=${EXTENSIONS} -DBUILD_REST=1
 endif
 ifneq ($(TIDY_THREADS),)
 	TIDY_THREAD_PARAMETER := -j ${TIDY_THREADS}
@@ -126,29 +138,49 @@ endif
 ifneq ($(TIDY_BINARY),)
 	TIDY_BINARY_PARAMETER := -clang-tidy-binary ${TIDY_BINARY}
 endif
-ifeq ($(BUILD_ARROW_ABI_TEST), 1)
-	EXTENSIONS:=${EXTENSIONS} -DBUILD_ARROW_ABI_TEST=1
-endif
+
 ifneq ("${FORCE_QUERY_LOG}a", "a")
 	EXTENSIONS:=${EXTENSIONS} -DFORCE_QUERY_LOG=${FORCE_QUERY_LOG}
 endif
+# TODO: deprecated, can be removed once all OOTEs use BUILD_OUT_OF_TREE_EXTENSIONS
 ifneq ($(BUILD_OUT_OF_TREE_EXTENSION),)
-	EXTENSIONS:=${EXTENSIONS} -DEXTERNAL_EXTENSION_DIRECTORY=$(BUILD_OUT_OF_TREE_EXTENSION)
+	EXTENSIONS:=${EXTENSIONS} -DEXTERNAL_EXTENSION_DIRECTORIES="$(BUILD_OUT_OF_TREE_EXTENSION)"
+endif
+ifneq ($(BUILD_OUT_OF_TREE_EXTENSIONS),)
+	EXTENSIONS:=${EXTENSIONS} -DDUCKDB_OOT_EXTENSION_NAMES="$(BUILD_OUT_OF_TREE_EXTENSIONS)"
+endif
+ifeq (${CRASH_ON_ASSERT}, 1)
+	EXTENSIONS:=${EXTENSIONS} -DASSERT_EXCEPTION=0
+endif
+ifeq (${DISABLE_STRING_INLINE}, 1)
+	EXTENSIONS:=${EXTENSIONS} -DDISABLE_STR_INLINE=1
+endif
+ifeq (${DESTROY_UNPINNED_BLOCKS}, 1)
+	EXTENSIONS:=${EXTENSIONS} -DDESTROY_UNPINNED_BLOCKS=1
+endif
+ifeq (${ALTERNATIVE_VERIFY}, 1)
+	EXTENSIONS:=${EXTENSIONS} -DALTERNATIVE_VERIFY=1
+endif
+ifeq (${DEBUG_MOVE}, 1)
+	EXTENSIONS:=${EXTENSIONS} -DDEBUG_MOVE=1
 endif
 
 clean:
 	rm -rf build
 
+clean-python:
+	tools/pythonpkg/clean.sh
+
 debug:
 	mkdir -p build/debug && \
 	cd build/debug && \
-	cmake $(GENERATOR) $(FORCE_COLOR) ${WARNINGS_AS_ERRORS} ${FORCE_32_BIT_FLAG} ${DISABLE_UNITY_FLAG} ${DISABLE_SANITIZER_FLAG} ${STATIC_LIBCPP} ${EXTENSIONS} -DCMAKE_BUILD_TYPE=Debug ../.. && \
+	cmake $(GENERATOR) $(FORCE_COLOR) ${WARNINGS_AS_ERRORS} ${FORCE_32_BIT_FLAG} ${DISABLE_UNITY_FLAG} ${DISABLE_SANITIZER_FLAG} ${STATIC_LIBCPP} ${EXTENSIONS} -DDEBUG_MOVE=1 -DCMAKE_BUILD_TYPE=Debug ../.. && \
 	cmake --build . --config Debug
 
-release_expanded:
-	mkdir -p build/release_expanded && \
-	cd build/release_expanded && \
-	cmake $(GENERATOR) $(FORCE_COLOR) ${WARNINGS_AS_ERRORS} ${FORCE_WARN_UNUSED_FLAG} ${FORCE_32_BIT_FLAG} ${DISABLE_UNITY_FLAG} ${DISABLE_SANITIZER_FLAG} ${STATIC_LIBCPP} ${EXTENSIONS} -DCMAKE_BUILD_TYPE=Release ../.. && \
+release:
+	mkdir -p build/release && \
+	cd build/release && \
+	cmake $(GENERATOR) $(FORCE_COLOR) ${WARNINGS_AS_ERRORS} ${FORCE_WARN_UNUSED_FLAG} ${FORCE_32_BIT_FLAG} ${DISABLE_UNITY_FLAG} ${DISABLE_SANITIZER_FLAG} ${OSX_BUILD_UNIVERSAL_FLAG} ${STATIC_LIBCPP} ${EXTENSIONS} -DCMAKE_BUILD_TYPE=Release ../.. && \
 	cmake --build . --config Release
 
 cldebug:
@@ -175,8 +207,8 @@ unittestarrow:
 	build/debug/test/unittest "[arrow]"
 
 
-allunit: release_expanded # uses release build because otherwise allunit takes forever
-	build/release_expanded/test/unittest "*"
+allunit: release # uses release build because otherwise allunit takes forever
+	build/release/test/unittest "*"
 
 docs:
 	mkdir -p build/docs && \
@@ -184,12 +216,6 @@ docs:
 
 doxygen: docs
 	open build/docs/html/index.html
-
-release:
-	mkdir -p build/release && \
-	cd build/release && \
-	cmake $(GENERATOR) $(FORCE_COLOR) ${WARNINGS_AS_ERRORS} ${FORCE_WARN_UNUSED_FLAG} ${FORCE_32_BIT_FLAG} ${DISABLE_UNITY_FLAG} ${DISABLE_SANITIZER_FLAG} ${OSX_BUILD_UNIVERSAL_FLAG} ${STATIC_LIBCPP} ${EXTENSIONS} -DCMAKE_BUILD_TYPE=Release ../.. && \
-	cmake --build . --config Release
 
 reldebug:
 	mkdir -p build/reldebug && \
@@ -211,7 +237,7 @@ benchmark:
 
 amaldebug:
 	mkdir -p build/amaldebug && \
-	python scripts/amalgamation.py && \
+	python3 scripts/amalgamation.py && \
 	cd build/amaldebug && \
 	cmake $(GENERATOR) $(FORCE_COLOR) ${STATIC_LIBCPP} ${EXTENSIONS} ${FORCE_32_BIT_FLAG} -DAMALGAMATION_BUILD=1 -DCMAKE_BUILD_TYPE=Debug ../.. && \
 	cmake --build . --config Debug
@@ -219,7 +245,7 @@ amaldebug:
 tidy-check:
 	mkdir -p build/tidy && \
 	cd build/tidy && \
-	cmake -DCLANG_TIDY=1 -DDISABLE_UNITY=1 -DBUILD_ODBC_DRIVER=TRUE -DBUILD_PARQUET_EXTENSION=TRUE -DBUILD_PYTHON_PKG=TRUE -DBUILD_SHELL=0 -DCMAKE_EXPORT_COMPILE_COMMANDS=ON ../.. && \
+	cmake -DCLANG_TIDY=1 -DDISABLE_UNITY=1 -DBUILD_PARQUET_EXTENSION=TRUE -DBUILD_PYTHON_PKG=TRUE -DBUILD_SHELL=0 -DCMAKE_EXPORT_COMPILE_COMMANDS=ON ../.. && \
 	python3 ../../scripts/run-clang-tidy.py -quiet ${TIDY_THREAD_PARAMETER} ${TIDY_BINARY_PARAMETER}
 
 tidy-fix:
@@ -229,7 +255,7 @@ tidy-fix:
 	python3 ../../scripts/run-clang-tidy.py -fix
 
 test_compile: # test compilation of individual cpp files
-	python scripts/amalgamation.py --compile
+	python3 scripts/amalgamation.py --compile
 
 format-check:
 	python3 scripts/format.py --all --check
@@ -253,12 +279,9 @@ format-master:
 third_party/sqllogictest:
 	git clone --depth=1 --branch hawkfish-statistical-rounding https://github.com/cwida/sqllogictest.git third_party/sqllogictest
 
-third_party/imdb/data:
-	wget -i "http://download.duckdb.org/imdb/list.txt" -P third_party/imdb/data
-
-sqlite: release_expanded | third_party/sqllogictest
+sqlite: release | third_party/sqllogictest
 	git --git-dir third_party/sqllogictest/.git pull
-	./build/release_expanded/test/unittest "[sqlitelogic]"
+	./build/release/test/unittest "[sqlitelogic]"
 
 sqlsmith: debug
 	./build/debug/third_party/sqlsmith/sqlsmith --duckdb=:memory:

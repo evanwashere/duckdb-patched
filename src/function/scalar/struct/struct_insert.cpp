@@ -14,7 +14,6 @@ static void StructInsertFunction(DataChunk &args, ExpressionState &state, Vector
 	starting_vec.Verify(args.size());
 
 	auto &starting_child_entries = StructVector::GetEntries(starting_vec);
-
 	auto &result_child_entries = StructVector::GetEntries(result);
 
 	// Assign the starting vector entries to the result vector
@@ -29,6 +28,10 @@ static void StructInsertFunction(DataChunk &args, ExpressionState &state, Vector
 	}
 
 	result.Verify(args.size());
+
+	if (args.AllConstant()) {
+		result.SetVectorType(VectorType::CONSTANT_VECTOR);
+	}
 }
 
 static unique_ptr<FunctionData> StructInsertBind(ClientContext &context, ScalarFunction &bound_function,
@@ -71,14 +74,16 @@ static unique_ptr<FunctionData> StructInsertBind(ClientContext &context, ScalarF
 	}
 
 	// this is more for completeness reasons
-	bound_function.return_type = LogicalType::STRUCT(move(new_struct_children));
+	bound_function.return_type = LogicalType::STRUCT(std::move(new_struct_children));
 	return make_unique<VariableReturnBindData>(bound_function.return_type);
 }
 
 unique_ptr<BaseStatistics> StructInsertStats(ClientContext &context, FunctionStatisticsInput &input) {
 	auto &child_stats = input.child_stats;
 	auto &expr = input.expr;
-
+	if (child_stats.empty() || !child_stats[0]) {
+		return nullptr;
+	}
 	auto &existing_struct_stats = (StructStatistics &)*child_stats[0];
 	auto new_struct_stats = make_unique<StructStatistics>(expr.return_type);
 
@@ -91,14 +96,16 @@ unique_ptr<BaseStatistics> StructInsertStats(ClientContext &context, FunctionSta
 	for (idx_t i = 1; i < child_stats.size(); i++) {
 		new_struct_stats->child_stats[offset + i] = child_stats[i] ? child_stats[i]->Copy() : nullptr;
 	}
-	return move(new_struct_stats);
+	return std::move(new_struct_stats);
 }
 
 void StructInsertFun::RegisterFunction(BuiltinFunctions &set) {
 	// the arguments and return types are actually set in the binder function
-	ScalarFunction fun("struct_insert", {}, LogicalTypeId::STRUCT, StructInsertFunction, false, StructInsertBind,
-	                   nullptr, StructInsertStats);
+	ScalarFunction fun("struct_insert", {}, LogicalTypeId::STRUCT, StructInsertFunction, StructInsertBind, nullptr,
+	                   StructInsertStats);
 	fun.varargs = LogicalType::ANY;
+	fun.serialize = VariableReturnBindData::Serialize;
+	fun.deserialize = VariableReturnBindData::Deserialize;
 	set.AddFunction(fun);
 }
 

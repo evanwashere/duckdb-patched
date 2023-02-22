@@ -3,19 +3,21 @@
 \name{duckdb_get_substrait}
 \alias{duckdb_get_substrait}
 \title{Get the Substrait plan for a SQL query
-TODO document this}
+Transforms a SQL query into a raw vector containing the serialized Substrait query blob}
 \usage{
-duckdb_get_substrait(conn, query)
+duckdb_get_substrait(conn, query, enable_optimizer = TRUE)
 }
 \arguments{
 \item{conn}{A DuckDB connection, created by \code{dbConnect()}.}
 
 \item{query}{The query string in SQL}
+
+\item{enable_optimizer}{Optional parameter to enable/disable query-optimizer. By default optimizer is enabled.}
 }
 \value{
 A raw vector containing the substrait protobuf blob
 }
 \description{
 Get the Substrait plan for a SQL query
-TODO document this
+Transforms a SQL query into a raw vector containing the serialized Substrait query blob
 }

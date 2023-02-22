@@ -11,33 +11,43 @@
 #include "duckdb/common/types/data_chunk.hpp"
 #include "duckdb/common/winapi.hpp"
 #include "duckdb/main/table_description.hpp"
-#include "duckdb/common/types/chunk_collection.hpp"
 
 namespace duckdb {
 
+class ColumnDataCollection;
 class ClientContext;
 class DuckDB;
 class TableCatalogEntry;
 class Connection;
 
+enum class AppenderType : uint8_t {
+	LOGICAL, // Cast input -> LogicalType
+	PHYSICAL // Cast input -> PhysicalType
+};
+
 //! The Appender class can be used to append elements to a table.
 class BaseAppender {
 protected:
-	//! The amount of chunks that will be gathered in the chunk collection before flushing
-	static constexpr const idx_t FLUSH_COUNT = 100;
+	//! The amount of tuples that will be gathered in the column data collection before flushing
+	static constexpr const idx_t FLUSH_COUNT = STANDARD_VECTOR_SIZE * 100;
 
+	Allocator &allocator;
 	//! The append types
 	vector<LogicalType> types;
 	//! The buffered data for the append
-	ChunkCollection collection;
+	unique_ptr<ColumnDataCollection> collection;
 	//! Internal chunk used for appends
-	unique_ptr<DataChunk> chunk;
+	DataChunk chunk;
 	//! The current column to append to
 	idx_t column = 0;
+	//! The type of the appender
+	AppenderType appender_type;
+
+protected:
+	DUCKDB_API BaseAppender(Allocator &allocator, AppenderType type);
+	DUCKDB_API BaseAppender(Allocator &allocator, vector<LogicalType> types, AppenderType type);
 
 public:
-	DUCKDB_API BaseAppender();
-	DUCKDB_API BaseAppender(vector<LogicalType> types);
 	DUCKDB_API virtual ~BaseAppender();
 
 	//! Begins a new row append, after calling this the other AppendX() functions
@@ -77,7 +87,7 @@ public:
 
 protected:
 	void Destructor();
-	virtual void FlushInternal(ChunkCollection &collection) = 0;
+	virtual void FlushInternal(ColumnDataCollection &collection) = 0;
 	void InitializeChunk();
 	void FlushChunk();
 
@@ -85,6 +95,8 @@ protected:
 	void AppendValueInternal(T value);
 	template <class SRC, class DST>
 	void AppendValueInternal(Vector &vector, SRC input);
+	template <class SRC, class DST>
+	void AppendDecimalValueInternal(Vector &vector, SRC input);
 
 	void AppendRowRecursive() {
 		EndRow();
@@ -111,7 +123,7 @@ public:
 	DUCKDB_API ~Appender() override;
 
 protected:
-	void FlushInternal(ChunkCollection &collection) override;
+	void FlushInternal(ColumnDataCollection &collection) override;
 };
 
 class InternalAppender : public BaseAppender {
@@ -125,7 +137,7 @@ public:
 	DUCKDB_API ~InternalAppender() override;
 
 protected:
-	void FlushInternal(ChunkCollection &collection) override;
+	void FlushInternal(ColumnDataCollection &collection) override;
 };
 
 template <>

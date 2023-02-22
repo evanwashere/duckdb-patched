@@ -5,6 +5,10 @@
 #include "duckdb/catalog/catalog_search_path.hpp"
 #include "duckdb/main/appender.hpp"
 #include "duckdb/common/operator/cast_operators.hpp"
+#include "duckdb/main/db_instance_cache.hpp"
+#include "duckdb/common/arrow/result_arrow_wrapper.hpp"
+#include "duckdb/function/table/arrow.hpp"
+#include "duckdb/main/database_manager.hpp"
 
 using namespace duckdb;
 using namespace std;
@@ -13,11 +17,13 @@ static jint JNI_VERSION = JNI_VERSION_1_6;
 
 // Static global vars of cached Java classes, methods and fields
 static jclass J_Charset;
-static jmethodID J_Charset_forName;
 static jmethodID J_Charset_decode;
+static jobject J_Charset_UTF8;
 
 static jclass J_CharBuffer;
 static jmethodID J_CharBuffer_toString;
+
+static jmethodID J_String_getBytes;
 
 static jclass J_SQLException;
 
@@ -30,6 +36,7 @@ static jclass J_Float;
 static jclass J_Double;
 static jclass J_String;
 static jclass J_Timestamp;
+static jclass J_TimestampTZ;
 static jclass J_Decimal;
 
 static jmethodID J_Bool_booleanValue;
@@ -40,6 +47,7 @@ static jmethodID J_Long_longValue;
 static jmethodID J_Float_floatValue;
 static jmethodID J_Double_doubleValue;
 static jmethodID J_Timestamp_getMicrosEpoch;
+static jmethodID J_TimestampTZ_getMicrosEpoch;
 static jmethodID J_Decimal_precision;
 static jmethodID J_Decimal_scale;
 static jmethodID J_Decimal_scaleByPowTen;
@@ -56,6 +64,13 @@ static jfieldID J_DuckVector_varlen;
 
 static jclass J_ByteBuffer;
 
+static jmethodID J_Map_entrySet;
+static jmethodID J_Set_iterator;
+static jmethodID J_Iterator_hasNext;
+static jmethodID J_Iterator_next;
+static jmethodID J_Entry_getKey;
+static jmethodID J_Entry_getValue;
+
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
 	// Get JNIEnv from vm
 	JNIEnv *env;
@@ -69,8 +84,10 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
 	J_Charset = (jclass)env->NewGlobalRef(tmpLocalRef);
 	env->DeleteLocalRef(tmpLocalRef);
 
-	J_Charset_forName = env->GetStaticMethodID(J_Charset, "forName", "(Ljava/lang/String;)Ljava/nio/charset/Charset;");
+	jmethodID forName = env->GetStaticMethodID(J_Charset, "forName", "(Ljava/lang/String;)Ljava/nio/charset/Charset;");
 	J_Charset_decode = env->GetMethodID(J_Charset, "decode", "(Ljava/nio/ByteBuffer;)Ljava/nio/CharBuffer;");
+	jobject charset = env->CallStaticObjectMethod(J_Charset, forName, env->NewStringUTF("UTF-8"));
+	J_Charset_UTF8 = env->NewGlobalRef(charset); // Prevent garbage collector from cleaning this up.
 
 	tmpLocalRef = env->FindClass("java/nio/CharBuffer");
 	J_CharBuffer = (jclass)env->NewGlobalRef(tmpLocalRef);
@@ -109,8 +126,29 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
 	tmpLocalRef = env->FindClass("org/duckdb/DuckDBTimestamp");
 	J_Timestamp = (jclass)env->NewGlobalRef(tmpLocalRef);
 	env->DeleteLocalRef(tmpLocalRef);
+	tmpLocalRef = env->FindClass("org/duckdb/DuckDBTimestampTZ");
+	J_TimestampTZ = (jclass)env->NewGlobalRef(tmpLocalRef);
+	env->DeleteLocalRef(tmpLocalRef);
 	tmpLocalRef = env->FindClass("java/math/BigDecimal");
 	J_Decimal = (jclass)env->NewGlobalRef(tmpLocalRef);
+	env->DeleteLocalRef(tmpLocalRef);
+
+	tmpLocalRef = env->FindClass("java/util/Map");
+	J_Map_entrySet = env->GetMethodID(tmpLocalRef, "entrySet", "()Ljava/util/Set;");
+	env->DeleteLocalRef(tmpLocalRef);
+
+	tmpLocalRef = env->FindClass("java/util/Set");
+	J_Set_iterator = env->GetMethodID(tmpLocalRef, "iterator", "()Ljava/util/Iterator;");
+	env->DeleteLocalRef(tmpLocalRef);
+
+	tmpLocalRef = env->FindClass("java/util/Iterator");
+	J_Iterator_hasNext = env->GetMethodID(tmpLocalRef, "hasNext", "()Z");
+	J_Iterator_next = env->GetMethodID(tmpLocalRef, "next", "()Ljava/lang/Object;");
+	env->DeleteLocalRef(tmpLocalRef);
+
+	tmpLocalRef = env->FindClass("java/util/Map$Entry");
+	J_Entry_getKey = env->GetMethodID(tmpLocalRef, "getKey", "()Ljava/lang/Object;");
+	J_Entry_getValue = env->GetMethodID(tmpLocalRef, "getValue", "()Ljava/lang/Object;");
 	env->DeleteLocalRef(tmpLocalRef);
 
 	J_Bool_booleanValue = env->GetMethodID(J_Bool, "booleanValue", "()Z");
@@ -121,6 +159,7 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
 	J_Float_floatValue = env->GetMethodID(J_Float, "floatValue", "()F");
 	J_Double_doubleValue = env->GetMethodID(J_Double, "doubleValue", "()D");
 	J_Timestamp_getMicrosEpoch = env->GetMethodID(J_Timestamp, "getMicrosEpoch", "()J");
+	J_TimestampTZ_getMicrosEpoch = env->GetMethodID(J_TimestampTZ, "getMicrosEpoch", "()J");
 	J_Decimal_precision = env->GetMethodID(J_Decimal, "precision", "()I");
 	J_Decimal_scale = env->GetMethodID(J_Decimal, "scale", "()I");
 	J_Decimal_scaleByPowTen = env->GetMethodID(J_Decimal, "scaleByPowerOfTen", "(I)Ljava/math/BigDecimal;");
@@ -131,12 +170,15 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
 	J_DuckResultSetMeta = (jclass)env->NewGlobalRef(tmpLocalRef);
 	env->DeleteLocalRef(tmpLocalRef);
 
-	J_DuckResultSetMeta_init = env->GetMethodID(J_DuckResultSetMeta, "<init>",
-	                                            "(II[Ljava/lang/String;[Ljava/lang/String;[Ljava/lang/String;)V");
+	J_DuckResultSetMeta_init =
+	    env->GetMethodID(J_DuckResultSetMeta, "<init>",
+	                     "(II[Ljava/lang/String;[Ljava/lang/String;[Ljava/lang/String;Ljava/lang/String;)V");
 
 	tmpLocalRef = env->FindClass("org/duckdb/DuckDBVector");
 	J_DuckVector = (jclass)env->NewGlobalRef(tmpLocalRef);
 	env->DeleteLocalRef(tmpLocalRef);
+
+	J_String_getBytes = env->GetMethodID(J_String, "getBytes", "(Ljava/nio/charset/Charset;)[B");
 
 	J_DuckVector_init = env->GetMethodID(J_DuckVector, "<init>", "(Ljava/lang/String;I[Z)V");
 	J_DuckVector_constlen = env->GetFieldID(J_DuckVector, "constlen_data", "Ljava/nio/ByteBuffer;");
@@ -156,6 +198,7 @@ JNIEXPORT void JNICALL JNI_OnUnload(JavaVM *vm, void *reserved) {
 
 	env->DeleteGlobalRef(J_Charset);
 	env->DeleteGlobalRef(J_CharBuffer);
+	env->DeleteGlobalRef(J_Charset_UTF8);
 	env->DeleteGlobalRef(J_SQLException);
 	env->DeleteGlobalRef(J_Bool);
 	env->DeleteGlobalRef(J_Byte);
@@ -166,6 +209,7 @@ JNIEXPORT void JNICALL JNI_OnUnload(JavaVM *vm, void *reserved) {
 	env->DeleteGlobalRef(J_Double);
 	env->DeleteGlobalRef(J_String);
 	env->DeleteGlobalRef(J_Timestamp);
+	env->DeleteGlobalRef(J_TimestampTZ);
 	env->DeleteGlobalRef(J_Decimal);
 	env->DeleteGlobalRef(J_DuckResultSetMeta);
 	env->DeleteGlobalRef(J_DuckVector);
@@ -187,11 +231,14 @@ static string byte_array_to_string(JNIEnv *env, jbyteArray ba_j) {
 	return ret;
 }
 
-static jobject decode_charbuffer_to_jstring(JNIEnv *env, const char *d_str, idx_t d_str_len) {
-	jobject charset = env->CallStaticObjectMethod(J_Charset, J_Charset_forName, env->NewStringUTF("UTF-8"));
+static string jstring_to_string(JNIEnv *env, jstring string_j) {
+	jbyteArray bytes = (jbyteArray)env->CallObjectMethod(string_j, J_String_getBytes, J_Charset_UTF8);
+	return byte_array_to_string(env, bytes);
+}
 
+static jobject decode_charbuffer_to_jstring(JNIEnv *env, const char *d_str, idx_t d_str_len) {
 	auto bb = env->NewDirectByteBuffer((void *)d_str, d_str_len);
-	auto j_cb = env->CallObjectMethod(charset, J_Charset_decode, bb);
+	auto j_cb = env->CallObjectMethod(J_Charset_UTF8, J_Charset_decode, bb);
 	auto j_str = env->CallObjectMethod(j_cb, J_CharBuffer_toString);
 	return j_str;
 }
@@ -208,15 +255,49 @@ static Connection *get_connection(JNIEnv *env, jobject conn_ref_buf) {
 	return nullptr;
 }
 
+//! The database instance cache, used so that multiple connections to the same file point to the same database object
+duckdb::DBInstanceCache instance_cache;
+std::mutex db_map_lock;
+//! A map of pointer to shared_ptr, to ensure we keep the DuckDB object alive
+std::unordered_map<duckdb::DuckDB *, shared_ptr<duckdb::DuckDB>> db_map;
+
 JNIEXPORT jobject JNICALL Java_org_duckdb_DuckDBNative_duckdb_1jdbc_1startup(JNIEnv *env, jclass, jbyteArray database_j,
-                                                                             jboolean read_only) {
+                                                                             jboolean read_only, jobject props) {
 	auto database = byte_array_to_string(env, database_j);
 	DBConfig config;
 	if (read_only) {
-		config.access_mode = AccessMode::READ_ONLY;
+		config.options.access_mode = AccessMode::READ_ONLY;
 	}
 	try {
-		auto db = new DuckDB(database, &config);
+		jobject entry_set = env->CallObjectMethod(props, J_Map_entrySet);
+		jobject iterator = env->CallObjectMethod(entry_set, J_Set_iterator);
+
+		while (env->CallBooleanMethod(iterator, J_Iterator_hasNext)) {
+			jobject pair = env->CallObjectMethod(iterator, J_Iterator_next);
+			jobject key = env->CallObjectMethod(pair, J_Entry_getKey);
+			jobject value = env->CallObjectMethod(pair, J_Entry_getValue);
+
+			D_ASSERT(env->IsInstanceOf(key, J_String));
+			const string &key_str = jstring_to_string(env, (jstring)key);
+
+			D_ASSERT(env->IsInstanceOf(value, J_String));
+			const string &value_str = jstring_to_string(env, (jstring)value);
+
+			auto const pOption = DBConfig::GetOptionByName(key_str);
+			if (pOption) {
+				config.SetOption(*pOption, Value(value_str));
+			} else {
+				throw CatalogException(
+				    "unrecognized configuration parameter \"%s\"\n%s", key_str,
+				    StringUtil::CandidatesErrorMessage(DBConfig::GetOptionNames(), key_str, "Did you mean"));
+			}
+		}
+		bool cache_instance = database != ":memory:" && !database.empty();
+		auto shared_db = instance_cache.GetOrCreateInstance(database, config, cache_instance);
+		auto db = shared_db.get();
+		std::lock_guard<std::mutex> lock(db_map_lock);
+		db_map[db] = std::move(shared_db);
+
 		return env->NewDirectByteBuffer(db, 0);
 	} catch (exception &e) {
 		env->ThrowNew(J_SQLException, e.what());
@@ -228,7 +309,8 @@ JNIEXPORT jobject JNICALL Java_org_duckdb_DuckDBNative_duckdb_1jdbc_1startup(JNI
 JNIEXPORT void JNICALL Java_org_duckdb_DuckDBNative_duckdb_1jdbc_1shutdown(JNIEnv *env, jclass, jobject db_ref_buf) {
 	auto db_ref = (DuckDB *)env->GetDirectBufferAddress(db_ref_buf);
 	if (db_ref) {
-		delete db_ref;
+		std::lock_guard<std::mutex> lock(db_map_lock);
+		db_map.erase(db_ref);
 	}
 }
 
@@ -251,9 +333,24 @@ JNIEXPORT jstring JNICALL Java_org_duckdb_DuckDBNative_duckdb_1jdbc_1get_1schema
 		return nullptr;
 	}
 
-	auto schema = ClientData::Get(*conn_ref->context).catalog_search_path->GetDefault();
+	auto entry = ClientData::Get(*conn_ref->context).catalog_search_path->GetDefault();
 
-	return env->NewStringUTF(schema.c_str());
+	return env->NewStringUTF(entry.schema.c_str());
+}
+
+JNIEXPORT jstring JNICALL Java_org_duckdb_DuckDBNative_duckdb_1jdbc_1get_1catalog(JNIEnv *env, jclass,
+                                                                                  jobject conn_ref_buf) {
+	auto conn_ref = get_connection(env, conn_ref_buf);
+	if (!conn_ref) {
+		return nullptr;
+	}
+
+	auto entry = ClientData::Get(*conn_ref->context).catalog_search_path->GetDefault();
+	if (entry.catalog == INVALID_CATALOG) {
+		entry.catalog = DatabaseManager::GetDefaultDatabase(*conn_ref->context);
+	}
+
+	return env->NewStringUTF(entry.catalog.c_str());
 }
 
 JNIEXPORT void JNICALL Java_org_duckdb_DuckDBNative_duckdb_1jdbc_1set_1auto_1commit(JNIEnv *env, jclass,
@@ -318,9 +415,9 @@ JNIEXPORT jobject JNICALL Java_org_duckdb_DuckDBNative_duckdb_1jdbc_1prepare(JNI
 	// we only return the result of the last statement to the user, unless one of the previous statements fails
 	for (idx_t i = 0; i + 1 < statements.size(); i++) {
 		try {
-			auto res = conn_ref->Query(move(statements[i]));
-			if (!res->success) {
-				env->ThrowNew(J_SQLException, res->error.c_str());
+			auto res = conn_ref->Query(std::move(statements[i]));
+			if (res->HasError()) {
+				env->ThrowNew(J_SQLException, res->GetError().c_str());
 				return nullptr;
 			}
 		} catch (const std::exception &ex) {
@@ -330,9 +427,9 @@ JNIEXPORT jobject JNICALL Java_org_duckdb_DuckDBNative_duckdb_1jdbc_1prepare(JNI
 	}
 
 	auto stmt_ref = new StatementHolder();
-	stmt_ref->stmt = conn_ref->Prepare(move(statements.back()));
-	if (!stmt_ref->stmt->success) {
-		string error_msg = string(stmt_ref->stmt->error);
+	stmt_ref->stmt = conn_ref->Prepare(std::move(statements.back()));
+	if (stmt_ref->stmt->HasError()) {
+		string error_msg = string(stmt_ref->stmt->GetError());
 		stmt_ref->stmt = nullptr;
 
 		// No success, so it must be deleted
@@ -355,13 +452,13 @@ JNIEXPORT jobject JNICALL Java_org_duckdb_DuckDBNative_duckdb_1jdbc_1execute(JNI
 	auto stmt_ref = (StatementHolder *)env->GetDirectBufferAddress(stmt_ref_buf);
 	if (!stmt_ref) {
 		env->ThrowNew(J_SQLException, "Invalid statement");
+		return nullptr;
 	}
-	auto res_ref = new ResultHolder();
+	auto res_ref = make_unique<ResultHolder>();
 	vector<Value> duckdb_params;
 
 	idx_t param_len = env->GetArrayLength(params);
 	if (param_len != stmt_ref->stmt->n_param) {
-		delete res_ref;
 		env->ThrowNew(J_SQLException, "Parameter count mismatch");
 		return nullptr;
 	}
@@ -387,6 +484,10 @@ JNIEXPORT jobject JNICALL Java_org_duckdb_DuckDBNative_duckdb_1jdbc_1execute(JNI
 			} else if (env->IsInstanceOf(param, J_Long)) {
 				duckdb_params.push_back(Value::BIGINT(env->CallLongMethod(param, J_Long_longValue)));
 				continue;
+			} else if (env->IsInstanceOf(param, J_TimestampTZ)) { // Check for subclass before superclass!
+				duckdb_params.push_back(
+				    Value::TIMESTAMPTZ((timestamp_t)env->CallLongMethod(param, J_TimestampTZ_getMicrosEpoch)));
+				continue;
 			} else if (env->IsInstanceOf(param, J_Timestamp)) {
 				duckdb_params.push_back(
 				    Value::TIMESTAMP((timestamp_t)env->CallLongMethod(param, J_Timestamp_getMicrosEpoch)));
@@ -401,6 +502,18 @@ JNIEXPORT jobject JNICALL Java_org_duckdb_DuckDBNative_duckdb_1jdbc_1execute(JNI
 				jint precision = env->CallIntMethod(param, J_Decimal_precision);
 				jint scale = env->CallIntMethod(param, J_Decimal_scale);
 
+				// Java BigDecimal type can have scale that exceeds the precision
+				// Which our DECIMAL type does not support (assert(width >= scale))
+				if (scale > precision) {
+					precision = scale;
+				}
+
+				// DECIMAL scale is unsigned, so negative values are not supported
+				if (scale < 0) {
+					env->ThrowNew(J_SQLException, "Converting from a BigDecimal with negative scale is not supported");
+					return nullptr;
+				}
+
 				if (precision <= 18) { // normal sizes -> avoid string processing
 					jobject no_point_dec = env->CallObjectMethod(param, J_Decimal_scaleByPowTen, scale);
 					jlong result = env->CallLongMethod(no_point_dec, J_Decimal_longValue);
@@ -409,19 +522,22 @@ JNIEXPORT jobject JNICALL Java_org_duckdb_DuckDBNative_duckdb_1jdbc_1execute(JNI
 					jobject str_val = env->CallObjectMethod(param, J_Decimal_toPlainString);
 					auto *str_char = env->GetStringUTFChars((jstring)str_val, 0);
 					Value val = Value(str_char);
-					val = val.CastAs(LogicalType::DECIMAL(precision, scale));
+					val = val.DefaultCastAs(LogicalType::DECIMAL(precision, scale));
 
 					duckdb_params.push_back(val);
 					env->ReleaseStringUTFChars((jstring)str_val, str_char);
 				}
 				continue;
 			} else if (env->IsInstanceOf(param, J_String)) {
-				auto *param_string = env->GetStringUTFChars((jstring)param, 0);
-				duckdb_params.push_back(Value(param_string));
-				env->ReleaseStringUTFChars((jstring)param, param_string);
+				auto param_string = jstring_to_string(env, (jstring)param);
+				try {
+					duckdb_params.push_back(Value(param_string));
+				} catch (Exception const &e) {
+					env->ThrowNew(J_SQLException, e.what());
+					return nullptr;
+				}
 				continue;
 			} else {
-				delete res_ref;
 				env->ThrowNew(J_SQLException, "Unsupported parameter type");
 				return nullptr;
 			}
@@ -429,14 +545,13 @@ JNIEXPORT jobject JNICALL Java_org_duckdb_DuckDBNative_duckdb_1jdbc_1execute(JNI
 	}
 
 	res_ref->res = stmt_ref->stmt->Execute(duckdb_params, false);
-	if (!res_ref->res->success) {
-		string error_msg = string(res_ref->res->error);
+	if (res_ref->res->HasError()) {
+		string error_msg = string(res_ref->res->GetError());
 		res_ref->res = nullptr;
-		delete res_ref;
 		env->ThrowNew(J_SQLException, error_msg.c_str());
 		return nullptr;
 	}
-	return env->NewDirectByteBuffer(res_ref, 0);
+	return env->NewDirectByteBuffer(res_ref.release(), 0);
 }
 
 JNIEXPORT void JNICALL Java_org_duckdb_DuckDBNative_duckdb_1jdbc_1release(JNIEnv *env, jclass, jobject stmt_ref_buf) {
@@ -493,7 +608,7 @@ static std::string type_to_jduckdb_type(LogicalType logical_type) {
 JNIEXPORT jobject JNICALL Java_org_duckdb_DuckDBNative_duckdb_1jdbc_1meta(JNIEnv *env, jclass, jobject stmt_ref_buf) {
 
 	auto stmt_ref = (StatementHolder *)env->GetDirectBufferAddress(stmt_ref_buf);
-	if (!stmt_ref || !stmt_ref->stmt || !stmt_ref->stmt->success) {
+	if (!stmt_ref || !stmt_ref->stmt || stmt_ref->stmt->HasError()) {
 		env->ThrowNew(J_SQLException, "Invalid statement");
 		return nullptr;
 	}
@@ -521,14 +636,17 @@ JNIEXPORT jobject JNICALL Java_org_duckdb_DuckDBNative_duckdb_1jdbc_1meta(JNIEnv
 		                           env->NewStringUTF(type_to_jduckdb_type(types[col_idx]).c_str()));
 	}
 
+	auto return_type =
+	    env->NewStringUTF(StatementReturnTypeToString(stmt_ref->stmt->GetStatementProperties().return_type).c_str());
+
 	return env->NewObject(J_DuckResultSetMeta, J_DuckResultSetMeta_init, stmt_ref->stmt->n_param, column_count,
-	                      name_array, type_array, type_detail_array);
+	                      name_array, type_array, type_detail_array, return_type);
 }
 
 JNIEXPORT jobjectArray JNICALL Java_org_duckdb_DuckDBNative_duckdb_1jdbc_1fetch(JNIEnv *env, jclass,
                                                                                 jobject res_ref_buf) {
 	auto res_ref = (ResultHolder *)env->GetDirectBufferAddress(res_ref_buf);
-	if (!res_ref || !res_ref->res || !res_ref->res->success) {
+	if (!res_ref || !res_ref->res || res_ref->res->HasError()) {
 		env->ThrowNew(J_SQLException, "Invalid result set");
 		return nullptr;
 	}
@@ -614,7 +732,10 @@ JNIEXPORT jobjectArray JNICALL Java_org_duckdb_DuckDBNative_duckdb_1jdbc_1fetch(
 		case LogicalTypeId::DOUBLE:
 			constlen_data = env->NewDirectByteBuffer(FlatVector::GetData(vec), row_count * sizeof(double));
 			break;
+		case LogicalTypeId::TIMESTAMP_SEC:
+		case LogicalTypeId::TIMESTAMP_MS:
 		case LogicalTypeId::TIMESTAMP:
+		case LogicalTypeId::TIMESTAMP_NS:
 		case LogicalTypeId::TIMESTAMP_TZ:
 			constlen_data = env->NewDirectByteBuffer(FlatVector::GetData(vec), row_count * sizeof(timestamp_t));
 			break;
@@ -622,7 +743,7 @@ JNIEXPORT jobjectArray JNICALL Java_org_duckdb_DuckDBNative_duckdb_1jdbc_1fetch(
 		case LogicalTypeId::DATE:
 		case LogicalTypeId::INTERVAL: {
 			Vector string_vec(LogicalType::VARCHAR);
-			VectorOperations::Cast(vec, string_vec, row_count);
+			VectorOperations::DefaultCast(vec, string_vec, row_count);
 			vec.ReferenceAndSetType(string_vec);
 			// fall through on purpose
 		}
@@ -660,6 +781,9 @@ JNIEXPORT jobjectArray JNICALL Java_org_duckdb_DuckDBNative_duckdb_1jdbc_1fetch(
 				env->SetObjectArrayElement(varlen_data, row_idx, j_obj);
 			}
 			break;
+		case LogicalTypeId::UUID:
+			constlen_data = env->NewDirectByteBuffer(FlatVector::GetData(vec), row_count * sizeof(hugeint_t));
+			break;
 		default:
 			env->ThrowNew(J_SQLException, ("Unsupported result column type " + vec.GetType().ToString()).c_str());
 			return nullptr;
@@ -676,17 +800,6 @@ JNIEXPORT jobjectArray JNICALL Java_org_duckdb_DuckDBNative_duckdb_1jdbc_1fetch(
 
 JNIEXPORT jint JNICALL Java_org_duckdb_DuckDBNative_duckdb_1jdbc_1fetch_1size(JNIEnv *, jclass) {
 	return STANDARD_VECTOR_SIZE;
-}
-
-JNIEXPORT jstring JNICALL Java_org_duckdb_DuckDBNative_duckdb_1jdbc_1prepare_1type(JNIEnv *env, jclass,
-                                                                                   jobject stmt_ref_buf) {
-
-	auto stmt_ref = (StatementHolder *)env->GetDirectBufferAddress(stmt_ref_buf);
-	if (!stmt_ref || !stmt_ref->stmt || !stmt_ref->stmt->success) {
-		env->ThrowNew(J_SQLException, "Invalid statement");
-		return nullptr;
-	}
-	return env->NewStringUTF(StatementTypeToString(stmt_ref->stmt->GetStatementType()).c_str());
 }
 
 JNIEXPORT jobject JNICALL Java_org_duckdb_DuckDBNative_duckdb_1jdbc_1create_1appender(JNIEnv *env, jclass,
@@ -865,4 +978,63 @@ JNIEXPORT void JNICALL Java_org_duckdb_DuckDBNative_duckdb_1jdbc_1appender_1appe
 		env->ThrowNew(J_SQLException, e.what());
 		return;
 	}
+}
+
+JNIEXPORT jlong JNICALL Java_org_duckdb_DuckDBNative_duckdb_1jdbc_1arrow_1stream(JNIEnv *env, jclass,
+                                                                                 jobject res_ref_buf,
+                                                                                 jlong batch_size) {
+
+	auto res_ref = (ResultHolder *)env->GetDirectBufferAddress(res_ref_buf);
+	if (!res_ref || !res_ref->res || res_ref->res->HasError()) {
+		env->ThrowNew(J_SQLException, "Invalid result set");
+	}
+
+	auto wrapper = new ResultArrowArrayStreamWrapper(std::move(res_ref->res), batch_size);
+	return (jlong)&wrapper->stream;
+}
+
+class JavaArrowTabularStreamFactory {
+public:
+	JavaArrowTabularStreamFactory(ArrowArrayStream *stream_ptr_p) : stream_ptr(stream_ptr_p) {};
+
+	static unique_ptr<ArrowArrayStreamWrapper> Produce(uintptr_t factory_p, ArrowStreamParameters &parameters) {
+
+		auto factory = (JavaArrowTabularStreamFactory *)factory_p;
+		if (!factory->stream_ptr->release) {
+			throw InvalidInputException("This stream has been released");
+		}
+		auto res = make_unique<ArrowArrayStreamWrapper>();
+		res->arrow_array_stream = *factory->stream_ptr;
+		factory->stream_ptr->release = nullptr;
+		return res;
+	}
+
+	static void GetSchema(uintptr_t factory_p, ArrowSchemaWrapper &schema) {
+		auto factory = (JavaArrowTabularStreamFactory *)factory_p;
+		if (!factory->stream_ptr->release) {
+			throw InvalidInputException("This stream has been released");
+		}
+		factory->stream_ptr->get_schema(factory->stream_ptr, &schema.arrow_schema);
+		return;
+	}
+
+	ArrowArrayStream *stream_ptr;
+};
+
+JNIEXPORT void JNICALL Java_org_duckdb_DuckDBNative_duckdb_1jdbc_1arrow_1register(JNIEnv *env, jclass,
+                                                                                  jobject conn_ref_buf,
+                                                                                  jlong arrow_array_stream_pointer,
+                                                                                  jbyteArray name_j) {
+
+	auto conn = get_connection(env, conn_ref_buf);
+	auto name = byte_array_to_string(env, name_j);
+
+	auto arrow_array_stream = (ArrowArrayStream *)(uintptr_t)arrow_array_stream_pointer;
+
+	auto factory = new JavaArrowTabularStreamFactory(arrow_array_stream);
+	vector<Value> parameters;
+	parameters.push_back(Value::POINTER((uintptr_t)factory));
+	parameters.push_back(Value::POINTER((uintptr_t)JavaArrowTabularStreamFactory::Produce));
+	parameters.push_back(Value::POINTER((uintptr_t)JavaArrowTabularStreamFactory::GetSchema));
+	conn->TableFunction("arrow_scan_dumb", parameters)->CreateView(name, true, true);
 }

@@ -12,6 +12,20 @@
 
 namespace duckdb {
 
+struct dtime_t;
+struct date_t;
+struct timestamp_t;
+
+struct interval_t {
+	int32_t months;
+	int32_t days;
+	int64_t micros;
+
+	inline bool operator==(const interval_t &rhs) const {
+		return this->days == rhs.days && this->months == rhs.months && this->micros == rhs.micros;
+	}
+};
+
 //! The Interval class is a static class that holds helper functions for the Interval
 //! type.
 class Interval {
@@ -74,6 +88,9 @@ public:
 
 	//! Returns the exact difference between two timestamps (days and seconds)
 	static interval_t GetDifference(timestamp_t timestamp_1, timestamp_t timestamp_2);
+
+	//! Returns the inverted interval
+	static interval_t Invert(interval_t interval);
 
 	//! Add an interval to a date
 	static date_t Add(date_t left, interval_t right);

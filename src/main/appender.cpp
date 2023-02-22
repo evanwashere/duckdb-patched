@@ -1,5 +1,6 @@
 #include "duckdb/main/appender.hpp"
 
+#include "duckdb/catalog/catalog_entry/duck_table_entry.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/main/connection.hpp"
@@ -9,13 +10,18 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/operator/cast_operators.hpp"
 #include "duckdb/common/operator/string_cast.hpp"
+#include "duckdb/common/types/column_data_collection.hpp"
+#include "duckdb/common/operator/decimal_cast_operators.hpp"
 
 namespace duckdb {
 
-BaseAppender::BaseAppender() : column(0) {
+BaseAppender::BaseAppender(Allocator &allocator, AppenderType type_p)
+    : allocator(allocator), column(0), appender_type(type_p) {
 }
 
-BaseAppender::BaseAppender(vector<LogicalType> types_p) : types(move(types_p)), column(0) {
+BaseAppender::BaseAppender(Allocator &allocator_p, vector<LogicalType> types_p, AppenderType type_p)
+    : allocator(allocator_p), types(std::move(types_p)),
+      collection(make_unique<ColumnDataCollection>(allocator, types)), column(0), appender_type(type_p) {
 	InitializeChunk();
 }
 
@@ -35,7 +41,8 @@ void BaseAppender::Destructor() {
 }
 
 InternalAppender::InternalAppender(ClientContext &context_p, TableCatalogEntry &table_p)
-    : BaseAppender(table_p.GetTypes()), context(context_p), table(table_p) {
+    : BaseAppender(Allocator::DefaultAllocator(), table_p.GetTypes(), AppenderType::PHYSICAL), context(context_p),
+      table(table_p) {
 }
 
 InternalAppender::~InternalAppender() {
@@ -43,7 +50,7 @@ InternalAppender::~InternalAppender() {
 }
 
 Appender::Appender(Connection &con, const string &schema_name, const string &table_name)
-    : BaseAppender(), context(con.context) {
+    : BaseAppender(Allocator::DefaultAllocator(), AppenderType::LOGICAL), context(con.context) {
 	description = con.TableInfo(schema_name, table_name);
 	if (!description) {
 		// table could not be found
@@ -53,6 +60,7 @@ Appender::Appender(Connection &con, const string &schema_name, const string &tab
 		types.push_back(column.Type());
 	}
 	InitializeChunk();
+	collection = make_unique<ColumnDataCollection>(allocator, types);
 }
 
 Appender::Appender(Connection &con, const string &table_name) : Appender(con, DEFAULT_SCHEMA, table_name) {
@@ -63,8 +71,7 @@ Appender::~Appender() {
 }
 
 void BaseAppender::InitializeChunk() {
-	chunk = make_unique<DataChunk>();
-	chunk->Initialize(types);
+	chunk.Initialize(allocator, types);
 }
 
 void BaseAppender::BeginRow() {
@@ -72,19 +79,40 @@ void BaseAppender::BeginRow() {
 
 void BaseAppender::EndRow() {
 	// check that all rows have been appended to
-	if (column != chunk->ColumnCount()) {
+	if (column != chunk.ColumnCount()) {
 		throw InvalidInputException("Call to EndRow before all rows have been appended to!");
 	}
 	column = 0;
-	chunk->SetCardinality(chunk->size() + 1);
-	if (chunk->size() >= STANDARD_VECTOR_SIZE) {
+	chunk.SetCardinality(chunk.size() + 1);
+	if (chunk.size() >= STANDARD_VECTOR_SIZE) {
 		FlushChunk();
 	}
 }
 
 template <class SRC, class DST>
 void BaseAppender::AppendValueInternal(Vector &col, SRC input) {
-	FlatVector::GetData<DST>(col)[chunk->size()] = Cast::Operation<SRC, DST>(input);
+	FlatVector::GetData<DST>(col)[chunk.size()] = Cast::Operation<SRC, DST>(input);
+}
+
+template <class SRC, class DST>
+void BaseAppender::AppendDecimalValueInternal(Vector &col, SRC input) {
+	switch (appender_type) {
+	case AppenderType::LOGICAL: {
+		auto &type = col.GetType();
+		D_ASSERT(type.id() == LogicalTypeId::DECIMAL);
+		auto width = DecimalType::GetWidth(type);
+		auto scale = DecimalType::GetScale(type);
+		TryCastToDecimal::Operation<SRC, DST>(input, FlatVector::GetData<DST>(col)[chunk.size()], nullptr, width,
+		                                      scale);
+		return;
+	}
+	case AppenderType::PHYSICAL: {
+		AppendValueInternal<SRC, DST>(col, input);
+		return;
+	}
+	default:
+		throw InternalException("Type not implemented for AppenderType");
+	}
 }
 
 template <class T>
@@ -92,7 +120,7 @@ void BaseAppender::AppendValueInternal(T input) {
 	if (column >= types.size()) {
 		throw InvalidInputException("Too many appends for chunk!");
 	}
-	auto &col = chunk->data[column];
+	auto &col = chunk.data[column];
 	switch (col.GetType().id()) {
 	case LogicalTypeId::BOOLEAN:
 		AppendValueInternal<T, bool>(col, input);
@@ -132,18 +160,20 @@ void BaseAppender::AppendValueInternal(T input) {
 		break;
 	case LogicalTypeId::DECIMAL:
 		switch (col.GetType().InternalType()) {
-		case PhysicalType::INT8:
-			AppendValueInternal<T, int8_t>(col, input);
-			break;
 		case PhysicalType::INT16:
-			AppendValueInternal<T, int16_t>(col, input);
+			AppendDecimalValueInternal<T, int16_t>(col, input);
 			break;
 		case PhysicalType::INT32:
-			AppendValueInternal<T, int32_t>(col, input);
+			AppendDecimalValueInternal<T, int32_t>(col, input);
+			break;
+		case PhysicalType::INT64:
+			AppendDecimalValueInternal<T, int64_t>(col, input);
+			break;
+		case PhysicalType::INT128:
+			AppendDecimalValueInternal<T, hugeint_t>(col, input);
 			break;
 		default:
-			AppendValueInternal<T, int64_t>(col, input);
-			break;
+			throw InternalException("Internal type not recognized for Decimal");
 		}
 		break;
 	case LogicalTypeId::DATE:
@@ -161,7 +191,7 @@ void BaseAppender::AppendValueInternal(T input) {
 		AppendValueInternal<T, interval_t>(col, input);
 		break;
 	case LogicalTypeId::VARCHAR:
-		FlatVector::GetData<string_t>(col)[chunk->size()] = StringCast::Operation<T>(input, col);
+		FlatVector::GetData<string_t>(col)[chunk.size()] = StringCast::Operation<T>(input, col);
 		break;
 	default:
 		AppendValue(Value::CreateValue<T>(input));
@@ -266,7 +296,7 @@ void BaseAppender::Append(interval_t value) {
 
 template <>
 void BaseAppender::Append(Value value) { // NOLINT: template shtuff
-	if (column >= chunk->ColumnCount()) {
+	if (column >= chunk.ColumnCount()) {
 		throw InvalidInputException("Too many appends for chunk!");
 	}
 	AppendValue(value);
@@ -274,15 +304,15 @@ void BaseAppender::Append(Value value) { // NOLINT: template shtuff
 
 template <>
 void BaseAppender::Append(std::nullptr_t value) {
-	if (column >= chunk->ColumnCount()) {
+	if (column >= chunk.ColumnCount()) {
 		throw InvalidInputException("Too many appends for chunk!");
 	}
-	auto &col = chunk->data[column++];
-	FlatVector::SetNull(col, chunk->size(), true);
+	auto &col = chunk.data[column++];
+	FlatVector::SetNull(col, chunk.size(), true);
 }
 
 void BaseAppender::AppendValue(const Value &value) {
-	chunk->SetValue(column, chunk->size(), value);
+	chunk.SetValue(column, chunk.size(), value);
 	column++;
 }
 
@@ -290,19 +320,19 @@ void BaseAppender::AppendDataChunk(DataChunk &chunk) {
 	if (chunk.GetTypes() != types) {
 		throw InvalidInputException("Type mismatch in Append DataChunk and the types required for appender");
 	}
-	collection.Append(chunk);
-	if (collection.ChunkCount() >= FLUSH_COUNT) {
+	collection->Append(chunk);
+	if (collection->Count() >= FLUSH_COUNT) {
 		Flush();
 	}
 }
 
 void BaseAppender::FlushChunk() {
-	if (chunk->size() == 0) {
+	if (chunk.size() == 0) {
 		return;
 	}
-	collection.Append(move(chunk));
-	InitializeChunk();
-	if (collection.ChunkCount() >= FLUSH_COUNT) {
+	collection->Append(chunk);
+	chunk.Reset();
+	if (collection->Count() >= FLUSH_COUNT) {
 		Flush();
 	}
 }
@@ -314,23 +344,21 @@ void BaseAppender::Flush() {
 	}
 
 	FlushChunk();
-	if (collection.Count() == 0) {
+	if (collection->Count() == 0) {
 		return;
 	}
-	FlushInternal(collection);
+	FlushInternal(*collection);
 
-	collection.Reset();
+	collection->Reset();
 	column = 0;
 }
 
-void Appender::FlushInternal(ChunkCollection &collection) {
+void Appender::FlushInternal(ColumnDataCollection &collection) {
 	context->Append(*description, collection);
 }
 
-void InternalAppender::FlushInternal(ChunkCollection &collection) {
-	for (auto &chunk : collection.Chunks()) {
-		table.storage->Append(table, context, *chunk);
-	}
+void InternalAppender::FlushInternal(ColumnDataCollection &collection) {
+	table.GetStorage().LocalAppend(table, context, collection);
 }
 
 void BaseAppender::Close() {

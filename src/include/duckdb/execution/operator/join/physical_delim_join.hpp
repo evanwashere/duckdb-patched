@@ -15,7 +15,7 @@ namespace duckdb {
 class PhysicalHashAggregate;
 
 //! PhysicalDelimJoin represents a join where the LHS will be duplicate eliminated and pushed into a
-//! PhysicalChunkCollectionScan in the RHS.
+//! PhysicalColumnDataScan in the RHS.
 class PhysicalDelimJoin : public PhysicalOperator {
 public:
 	PhysicalDelimJoin(vector<LogicalType> types, unique_ptr<PhysicalOperator> original_join,
@@ -43,11 +43,13 @@ public:
 	bool ParallelSink() const override {
 		return true;
 	}
-
+	bool IsOrderPreserving() const override {
+		return false;
+	}
 	string ParamsToString() const override;
 
 public:
-	void BuildPipelines(Executor &executor, Pipeline &current, PipelineBuildState &state) override;
+	void BuildPipelines(Pipeline &current, MetaPipeline &meta_pipeline) override;
 };
 
 } // namespace duckdb

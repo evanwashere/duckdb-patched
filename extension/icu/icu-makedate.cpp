@@ -7,6 +7,8 @@
 #include "include/icu-datefunc.hpp"
 #include "include/icu-datetrunc.hpp"
 
+#include <cmath>
+
 namespace duckdb {
 
 struct ICUMakeTimestampTZFunc : public ICUDateFunc {
@@ -71,13 +73,13 @@ struct ICUMakeTimestampTZFunc : public ICUDateFunc {
 	template <typename TA>
 	static ScalarFunction GetSenaryFunction(const LogicalTypeId &type) {
 		return ScalarFunction({type, type, type, type, type, LogicalType::DOUBLE}, LogicalType::TIMESTAMP_TZ,
-		                      Execute<TA>, false, false, Bind);
+		                      Execute<TA>, Bind);
 	}
 
 	template <typename TA>
 	static ScalarFunction GetSeptenaryFunction(const LogicalTypeId &type) {
 		return ScalarFunction({type, type, type, type, type, LogicalType::DOUBLE, LogicalType::VARCHAR},
-		                      LogicalType::TIMESTAMP_TZ, Execute<TA>, false, false, Bind);
+		                      LogicalType::TIMESTAMP_TZ, Execute<TA>, Bind);
 	}
 
 	static void AddFunction(const string &name, ClientContext &context) {
@@ -86,7 +88,7 @@ struct ICUMakeTimestampTZFunc : public ICUDateFunc {
 		set.AddFunction(GetSeptenaryFunction<int64_t>(LogicalType::BIGINT));
 
 		CreateScalarFunctionInfo func_info(set);
-		auto &catalog = Catalog::GetCatalog(context);
+		auto &catalog = Catalog::GetSystemCatalog(context);
 		catalog.AddFunction(context, &func_info);
 	}
 };

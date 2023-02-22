@@ -6,12 +6,13 @@ namespace duckdb {
 
 PendingQueryResult::PendingQueryResult(shared_ptr<ClientContext> context_p, PreparedStatementData &statement,
                                        vector<LogicalType> types_p, bool allow_stream_result)
-    : BaseQueryResult(QueryResultType::PENDING_RESULT, statement.statement_type, statement.properties, move(types_p),
-                      statement.names),
-      context(move(context_p)), allow_stream_result(allow_stream_result) {
+    : BaseQueryResult(QueryResultType::PENDING_RESULT, statement.statement_type, statement.properties,
+                      std::move(types_p), statement.names),
+      context(std::move(context_p)), allow_stream_result(allow_stream_result) {
 }
 
-PendingQueryResult::PendingQueryResult(string error) : BaseQueryResult(QueryResultType::PENDING_RESULT, move(error)) {
+PendingQueryResult::PendingQueryResult(PreservedError error)
+    : BaseQueryResult(QueryResultType::PENDING_RESULT, std::move(error)) {
 }
 
 PendingQueryResult::~PendingQueryResult() {
@@ -19,20 +20,26 @@ PendingQueryResult::~PendingQueryResult() {
 
 unique_ptr<ClientContextLock> PendingQueryResult::LockContext() {
 	if (!context) {
-		throw InvalidInputException("Attempting to execute an unsuccessful or closed pending query result\nError: %s",
-		                            error);
+		if (HasError()) {
+			throw InvalidInputException(
+			    "Attempting to execute an unsuccessful or closed pending query result\nError: %s", GetError());
+		}
+		throw InvalidInputException("Attempting to execute an unsuccessful or closed pending query result");
 	}
 	return context->LockContext();
 }
 
 void PendingQueryResult::CheckExecutableInternal(ClientContextLock &lock) {
-	bool invalidated = !success || !context;
+	bool invalidated = HasError() || !context;
 	if (!invalidated) {
 		invalidated = !context->IsActiveResult(lock, this);
 	}
 	if (invalidated) {
-		throw InvalidInputException("Attempting to execute an unsuccessful or closed pending query result\nError: %s",
-		                            error);
+		if (HasError()) {
+			throw InvalidInputException(
+			    "Attempting to execute an unsuccessful or closed pending query result\nError: %s", GetError());
+		}
+		throw InvalidInputException("Attempting to execute an unsuccessful or closed pending query result");
 	}
 }
 
@@ -50,7 +57,7 @@ unique_ptr<QueryResult> PendingQueryResult::ExecuteInternal(ClientContextLock &l
 	CheckExecutableInternal(lock);
 	while (ExecuteTaskInternal(lock) == PendingExecutionResult::RESULT_NOT_READY) {
 	}
-	if (!success) {
+	if (HasError()) {
 		return make_unique<MaterializedQueryResult>(error);
 	}
 	auto result = context->FetchResultInternal(lock, *this);

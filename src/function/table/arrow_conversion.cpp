@@ -18,17 +18,16 @@ void ShiftRight(unsigned char *ar, int size, int shift) {
 	}
 }
 
-void SetValidityMask(Vector &vector, ArrowArray &array, ArrowScanLocalState &scan_state, idx_t size,
-                     int64_t nested_offset, bool add_null = false) {
-	auto &mask = FlatVector::Validity(vector);
+void GetValidityMask(ValidityMask &mask, ArrowArray &array, ArrowScanLocalState &scan_state, idx_t size,
+                     int64_t nested_offset = -1, bool add_null = false) {
 	if (array.null_count != 0 && array.buffers[0]) {
-		D_ASSERT(vector.GetVectorType() == VectorType::FLAT_VECTOR);
 		auto bit_offset = scan_state.chunk_offset + array.offset;
 		if (nested_offset != -1) {
 			bit_offset = nested_offset;
 		}
-		auto n_bitmask_bytes = (size + 8 - 1) / 8;
 		mask.EnsureWritable();
+#if STANDARD_VECTOR_SIZE > 64
+		auto n_bitmask_bytes = (size + 8 - 1) / 8;
 		if (bit_offset % 8 == 0) {
 			//! just memcpy nullmask
 			memcpy((void *)mask.GetData(), (uint8_t *)array.buffers[0] + bit_offset / 8, n_bitmask_bytes);
@@ -40,6 +39,19 @@ void SetValidityMask(Vector &vector, ArrowArray &array, ArrowScanLocalState &sca
 			           bit_offset % 8); //! why this has to be a right shift is a mystery to me
 			memcpy((void *)mask.GetData(), (data_ptr_t)temp_nullmask.data(), n_bitmask_bytes);
 		}
+#else
+		auto byte_offset = bit_offset / 8;
+		auto source_data = (uint8_t *)array.buffers[0];
+		bit_offset %= 8;
+		for (idx_t i = 0; i < size; i++) {
+			mask.Set(i, source_data[byte_offset] & (1 << bit_offset));
+			bit_offset++;
+			if (bit_offset == 8) {
+				bit_offset = 0;
+				byte_offset++;
+			}
+		}
+#endif
 	}
 	if (add_null) {
 		//! We are setting a validity mask of the data part of dictionary vector
@@ -50,23 +62,11 @@ void SetValidityMask(Vector &vector, ArrowArray &array, ArrowScanLocalState &sca
 	}
 }
 
-void GetValidityMask(ValidityMask &mask, ArrowArray &array, ArrowScanLocalState &scan_state, idx_t size) {
-	if (array.null_count != 0 && array.buffers[0]) {
-		auto bit_offset = scan_state.chunk_offset + array.offset;
-		auto n_bitmask_bytes = (size + 8 - 1) / 8;
-		mask.EnsureWritable();
-		if (bit_offset % 8 == 0) {
-			//! just memcpy nullmask
-			memcpy((void *)mask.GetData(), (uint8_t *)array.buffers[0] + bit_offset / 8, n_bitmask_bytes);
-		} else {
-			//! need to re-align nullmask
-			std::vector<uint8_t> temp_nullmask(n_bitmask_bytes + 1);
-			memcpy(temp_nullmask.data(), (uint8_t *)array.buffers[0] + bit_offset / 8, n_bitmask_bytes + 1);
-			ShiftRight(temp_nullmask.data(), n_bitmask_bytes + 1,
-			           bit_offset % 8); //! why this has to be a right shift is a mystery to me
-			memcpy((void *)mask.GetData(), (data_ptr_t)temp_nullmask.data(), n_bitmask_bytes);
-		}
-	}
+void SetValidityMask(Vector &vector, ArrowArray &array, ArrowScanLocalState &scan_state, idx_t size,
+                     int64_t nested_offset, bool add_null = false) {
+	D_ASSERT(vector.GetVectorType() == VectorType::FLAT_VECTOR);
+	auto &mask = FlatVector::Validity(vector);
+	GetValidityMask(mask, array, scan_state, size, nested_offset, add_null);
 }
 
 void ColumnArrowToDuckDB(Vector &vector, ArrowArray &array, ArrowScanLocalState &scan_state, idx_t size,
@@ -96,7 +96,7 @@ void ArrowToDuckDBList(Vector &vector, ArrowArray &array, ArrowScanLocalState &s
 			le.length = original_type.second;
 			cur_offset += original_type.second;
 		}
-		list_size = cur_offset;
+		list_size = start_offset + cur_offset;
 	} else if (original_type.first == ArrowVariableSizeType::NORMAL) {
 		auto offsets = (uint32_t *)array.buffers[1] + array.offset + scan_state.chunk_offset;
 		if (nested_offset != -1) {
@@ -227,47 +227,6 @@ void ArrowToDuckDBMapVerify(Vector &vector, idx_t count) {
 	}
 }
 
-void ArrowToDuckDBMapList(Vector &vector, ArrowArray &array, ArrowScanLocalState &scan_state, idx_t size,
-                          unordered_map<idx_t, unique_ptr<ArrowConvertData>> &arrow_convert_data, idx_t col_idx,
-                          pair<idx_t, idx_t> &arrow_convert_idx, uint32_t *offsets, ValidityMask *parent_mask) {
-	idx_t list_size = offsets[size] - offsets[0];
-	ListVector::Reserve(vector, list_size);
-
-	auto &child_vector = ListVector::GetEntry(vector);
-	auto list_data = FlatVector::GetData<list_entry_t>(vector);
-	auto cur_offset = 0;
-	for (idx_t i = 0; i < size; i++) {
-		auto &le = list_data[i];
-		le.offset = cur_offset;
-		le.length = offsets[i + 1] - offsets[i];
-		cur_offset += le.length;
-	}
-	ListVector::SetListSize(vector, list_size);
-	if (list_size == 0 && offsets[0] == 0) {
-		SetValidityMask(child_vector, array, scan_state, list_size, -1);
-	} else {
-		SetValidityMask(child_vector, array, scan_state, list_size, offsets[0]);
-	}
-
-	auto &list_mask = FlatVector::Validity(vector);
-	if (parent_mask) {
-		//! Since this List is owned by a struct we must guarantee their validity map matches on Null
-		if (!parent_mask->AllValid()) {
-			for (idx_t i = 0; i < size; i++) {
-				if (!parent_mask->RowIsValid(i)) {
-					list_mask.SetInvalid(i);
-				}
-			}
-		}
-	}
-	if (list_size == 0 && offsets[0] == 0) {
-		ColumnArrowToDuckDB(child_vector, array, scan_state, list_size, arrow_convert_data, col_idx, arrow_convert_idx,
-		                    -1);
-	} else {
-		ColumnArrowToDuckDB(child_vector, array, scan_state, list_size, arrow_convert_data, col_idx, arrow_convert_idx,
-		                    offsets[0]);
-	}
-}
 template <class T>
 static void SetVectorString(Vector &vector, idx_t size, char *cdata, T *offsets) {
 	auto strings = FlatVector::GetData<string_t>(vector);
@@ -410,7 +369,6 @@ void ColumnArrowToDuckDB(Vector &vector, ArrowArray &array, ArrowScanLocalState 
 		DirectConversion(vector, array, scan_state, nested_offset);
 		break;
 	}
-	case LogicalTypeId::JSON:
 	case LogicalTypeId::VARCHAR: {
 		auto original_type = arrow_convert_data[col_idx]->variable_sz_type[arrow_convert_idx.first++];
 		auto cdata = (char *)array.buffers[2];
@@ -447,7 +405,7 @@ void ColumnArrowToDuckDB(Vector &vector, ArrowArray &array, ArrowScanLocalState 
 			}
 			auto tgt_ptr = (date_t *)FlatVector::GetData(vector);
 			for (idx_t row = 0; row < size; row++) {
-				tgt_ptr[row] = date_t(int64_t(src_ptr[row]) / (1000 * 60 * 60 * 24));
+				tgt_ptr[row] = date_t(int64_t(src_ptr[row]) / static_cast<int64_t>(1000 * 60 * 60 * 24));
 			}
 			break;
 		}
@@ -619,20 +577,8 @@ void ColumnArrowToDuckDB(Vector &vector, ArrowArray &array, ArrowScanLocalState 
 		break;
 	}
 	case LogicalTypeId::MAP: {
-		//! Since this is a map we skip first child, because its a struct
-		auto &struct_arrow = *array.children[0];
-		auto &child_entries = StructVector::GetEntries(vector);
-		D_ASSERT(child_entries.size() == 2);
-		auto offsets = (uint32_t *)array.buffers[1] + array.offset + scan_state.chunk_offset;
-		if (nested_offset != -1) {
-			offsets = (uint32_t *)array.buffers[1] + nested_offset;
-		}
-		auto &struct_validity_mask = FlatVector::Validity(vector);
-		//! Fill the children
-		for (idx_t type_idx = 0; type_idx < (idx_t)struct_arrow.n_children; type_idx++) {
-			ArrowToDuckDBMapList(*child_entries[type_idx], *struct_arrow.children[type_idx], scan_state, size,
-			                     arrow_convert_data, col_idx, arrow_convert_idx, offsets, &struct_validity_mask);
-		}
+		ArrowToDuckDBList(vector, array, scan_state, size, arrow_convert_data, col_idx, arrow_convert_idx,
+		                  nested_offset, parent_mask);
 		ArrowToDuckDBMapVerify(vector, size);
 		break;
 	}
@@ -794,7 +740,7 @@ void ColumnArrowToDuckDBDictionary(Vector &vector, ArrowArray &array, ArrowScanL
 		SetValidityMask(*base_vector, *array.dictionary, scan_state, array.dictionary->length, 0, array.null_count > 0);
 		ColumnArrowToDuckDB(*base_vector, *array.dictionary, scan_state, array.dictionary->length, arrow_convert_data,
 		                    col_idx, arrow_convert_idx);
-		dict_vectors[col_idx] = move(base_vector);
+		dict_vectors[col_idx] = std::move(base_vector);
 	}
 	auto dictionary_type = arrow_convert_data[col_idx]->dictionary_type;
 	//! Get Pointer to Indices of Dictionary
@@ -812,11 +758,20 @@ void ColumnArrowToDuckDBDictionary(Vector &vector, ArrowArray &array, ArrowScanL
 
 void ArrowTableFunction::ArrowToDuckDB(ArrowScanLocalState &scan_state,
                                        unordered_map<idx_t, unique_ptr<ArrowConvertData>> &arrow_convert_data,
-                                       DataChunk &output, idx_t start) {
+                                       DataChunk &output, idx_t start, bool arrow_scan_is_projected) {
 	for (idx_t idx = 0; idx < output.ColumnCount(); idx++) {
 		auto col_idx = scan_state.column_ids[idx];
+
+		// If projection was not pushed down into the arrow scanner, but projection pushdown is enabled on the
+		// table function, we need to use original column ids here.
+		auto arrow_array_idx = arrow_scan_is_projected ? idx : col_idx;
+
+		if (col_idx == COLUMN_IDENTIFIER_ROW_ID) {
+			continue;
+		}
+
 		std::pair<idx_t, idx_t> arrow_convert_idx {0, 0};
-		auto &array = *scan_state.chunk->arrow_array.children[idx];
+		auto &array = *scan_state.chunk->arrow_array.children[arrow_array_idx];
 		if (!array.release) {
 			throw InvalidInputException("arrow_scan: released array passed");
 		}

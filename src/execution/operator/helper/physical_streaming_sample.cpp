@@ -6,7 +6,7 @@ namespace duckdb {
 
 PhysicalStreamingSample::PhysicalStreamingSample(vector<LogicalType> types, SampleMethod method, double percentage,
                                                  int64_t seed, idx_t estimated_cardinality)
-    : PhysicalOperator(PhysicalOperatorType::STREAMING_SAMPLE, move(types), estimated_cardinality), method(method),
+    : PhysicalOperator(PhysicalOperatorType::STREAMING_SAMPLE, std::move(types), estimated_cardinality), method(method),
       percentage(percentage / 100), seed(seed) {
 }
 
@@ -48,7 +48,7 @@ void PhysicalStreamingSample::BernoulliSample(DataChunk &input, DataChunk &resul
 	}
 }
 
-unique_ptr<OperatorState> PhysicalStreamingSample::GetOperatorState(ClientContext &context) const {
+unique_ptr<OperatorState> PhysicalStreamingSample::GetOperatorState(ExecutionContext &context) const {
 	return make_unique<StreamingSampleOperatorState>(seed);
 }
 

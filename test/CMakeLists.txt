@@ -5,17 +5,15 @@ include_directories(include)
 
 add_subdirectory(api)
 add_subdirectory(appender)
+add_subdirectory(arrow_roundtrip)
 add_subdirectory(common)
 add_subdirectory(extension)
 add_subdirectory(helpers)
+add_subdirectory(memoryleak)
 add_subdirectory(sql)
 add_subdirectory(sqlite)
 add_subdirectory(ossfuzz)
-
-if(BUILD_ARROW_ABI_TEST)
-  add_subdirectory(arrow)
-  target_compile_options(test_arrow PRIVATE "-w")
-endif()
+add_subdirectory(mbedtls)
 
 if(NOT WIN32 AND NOT SUN)
   if(${BUILD_TPCE})
@@ -27,10 +25,6 @@ endif()
 add_definitions(-DDUCKDB_ROOT_DIRECTORY="${PROJECT_SOURCE_DIR}")
 
 add_executable(unittest unittest.cpp ${ALL_OBJECT_FILES})
-
-if(BUILD_ARROW_ABI_TEST)
-  target_link_libraries(unittest test_arrow)
-endif()
 
 if(NOT WIN32 AND NOT SUN)
   target_link_libraries(unittest duckdb test_helpers)

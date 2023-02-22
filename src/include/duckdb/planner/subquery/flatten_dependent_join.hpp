@@ -18,11 +18,12 @@ namespace duckdb {
 //! The FlattenDependentJoins class is responsible for pushing the dependent join down into the plan to create a
 //! flattened subquery
 struct FlattenDependentJoins {
-	FlattenDependentJoins(Binder &binder, const vector<CorrelatedColumnInfo> &correlated, bool any_join = false);
+	FlattenDependentJoins(Binder &binder, const vector<CorrelatedColumnInfo> &correlated, bool perform_delim = true,
+	                      bool any_join = false);
 
 	//! Detects which Logical Operators have correlated expressions that they are dependent upon, filling the
 	//! has_correlated_expressions map.
-	bool DetectCorrelatedExpressions(LogicalOperator *op);
+	bool DetectCorrelatedExpressions(LogicalOperator *op, bool lateral = false);
 
 	//! Push the dependent join down a LogicalOperator
 	unique_ptr<LogicalOperator> PushDownDependentJoin(unique_ptr<LogicalOperator> plan);
@@ -37,6 +38,7 @@ struct FlattenDependentJoins {
 	const vector<CorrelatedColumnInfo> &correlated_columns;
 	vector<LogicalType> delim_types;
 
+	bool perform_delim;
 	bool any_join;
 
 private:

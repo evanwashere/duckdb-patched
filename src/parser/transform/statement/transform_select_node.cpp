@@ -1,10 +1,10 @@
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/string_util.hpp"
+#include "duckdb/parser/expression/star_expression.hpp"
 #include "duckdb/parser/query_node/select_node.hpp"
 #include "duckdb/parser/query_node/set_operation_node.hpp"
 #include "duckdb/parser/statement/select_statement.hpp"
 #include "duckdb/parser/transformer.hpp"
-#include "duckdb/parser/expression/star_expression.hpp"
-#include "duckdb/common/string_util.hpp"
 
 namespace duckdb {
 
@@ -45,7 +45,7 @@ unique_ptr<QueryNode> Transformer::TransformSelectNode(duckdb_libpgquery::PGSele
 				//  add the columns defined in the ON clause to the select list
 				TransformExpressionList(*stmt->distinctClause, modifier->distinct_on_targets);
 			}
-			result->modifiers.push_back(move(modifier));
+			result->modifiers.push_back(std::move(modifier));
 		}
 
 		// do this early so the value lists also have a `FROM`
@@ -77,7 +77,8 @@ unique_ptr<QueryNode> Transformer::TransformSelectNode(duckdb_libpgquery::PGSele
 	}
 	case duckdb_libpgquery::PG_SETOP_UNION:
 	case duckdb_libpgquery::PG_SETOP_EXCEPT:
-	case duckdb_libpgquery::PG_SETOP_INTERSECT: {
+	case duckdb_libpgquery::PG_SETOP_INTERSECT:
+	case duckdb_libpgquery::PG_SETOP_UNION_BY_NAME: {
 		node = make_unique<SetOperationNode>();
 		auto result = (SetOperationNode *)node.get();
 		if (stmt->withClause) {
@@ -101,6 +102,10 @@ unique_ptr<QueryNode> Transformer::TransformSelectNode(duckdb_libpgquery::PGSele
 		case duckdb_libpgquery::PG_SETOP_INTERSECT:
 			result->setop_type = SetOperationType::INTERSECT;
 			break;
+		case duckdb_libpgquery::PG_SETOP_UNION_BY_NAME:
+			select_distinct = !stmt->all;
+			result->setop_type = SetOperationType::UNION_BY_NAME;
+			break;
 		default:
 			throw Exception("Unexpected setop type");
 		}
@@ -121,8 +126,8 @@ unique_ptr<QueryNode> Transformer::TransformSelectNode(duckdb_libpgquery::PGSele
 	TransformOrderBy(stmt->sortClause, orders);
 	if (!orders.empty()) {
 		auto order_modifier = make_unique<OrderModifier>();
-		order_modifier->orders = move(orders);
-		node->modifiers.push_back(move(order_modifier));
+		order_modifier->orders = std::move(orders);
+		node->modifiers.push_back(std::move(order_modifier));
 	}
 	if (stmt->limitCount || stmt->limitOffset) {
 		if (stmt->limitCount && stmt->limitCount->type == duckdb_libpgquery::T_PGLimitPercent) {
@@ -132,7 +137,7 @@ unique_ptr<QueryNode> Transformer::TransformSelectNode(duckdb_libpgquery::PGSele
 			if (stmt->limitOffset) {
 				limit_percent_modifier->offset = TransformExpression(stmt->limitOffset);
 			}
-			node->modifiers.push_back(move(limit_percent_modifier));
+			node->modifiers.push_back(std::move(limit_percent_modifier));
 		} else {
 			auto limit_modifier = make_unique<LimitModifier>();
 			if (stmt->limitCount) {
@@ -141,7 +146,7 @@ unique_ptr<QueryNode> Transformer::TransformSelectNode(duckdb_libpgquery::PGSele
 			if (stmt->limitOffset) {
 				limit_modifier->offset = TransformExpression(stmt->limitOffset);
 			}
-			node->modifiers.push_back(move(limit_modifier));
+			node->modifiers.push_back(std::move(limit_modifier));
 		}
 	}
 	return node;

@@ -3,11 +3,12 @@
 #include "utf8proc_wrapper.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/vector.hpp"
+#include "duckdb/main/error_manager.hpp"
 
 namespace duckdb {
 
 StringStatistics::StringStatistics(LogicalType type_p, StatisticsType stats_type)
-    : BaseStatistics(move(type_p), stats_type) {
+    : BaseStatistics(std::move(type_p), stats_type) {
 	InitializeBase();
 	for (idx_t i = 0; i < MAX_STRING_MINMAX_SIZE; i++) {
 		min[i] = 0xFF;
@@ -26,7 +27,7 @@ unique_ptr<BaseStatistics> StringStatistics::Copy() const {
 	memcpy(result->max, max, MAX_STRING_MINMAX_SIZE);
 	result->has_unicode = has_unicode;
 	result->max_string_length = max_string_length;
-	return move(result);
+	return std::move(result);
 }
 
 void StringStatistics::Serialize(FieldWriter &writer) const {
@@ -38,13 +39,13 @@ void StringStatistics::Serialize(FieldWriter &writer) const {
 }
 
 unique_ptr<BaseStatistics> StringStatistics::Deserialize(FieldReader &reader, LogicalType type) {
-	auto stats = make_unique<StringStatistics>(move(type), StatisticsType::LOCAL_STATS);
+	auto stats = make_unique<StringStatistics>(std::move(type), StatisticsType::LOCAL_STATS);
 	reader.ReadBlob(stats->min, MAX_STRING_MINMAX_SIZE);
 	reader.ReadBlob(stats->max, MAX_STRING_MINMAX_SIZE);
 	stats->has_unicode = reader.ReadRequired<bool>();
 	stats->max_string_length = reader.ReadRequired<uint32_t>();
 	stats->has_overflow_strings = reader.ReadRequired<bool>();
-	return move(stats);
+	return std::move(stats);
 }
 
 static int StringValueComparison(const_data_ptr_t data, idx_t len, const_data_ptr_t comparison) {
@@ -92,7 +93,8 @@ void StringStatistics::Update(const string_t &value) {
 		if (unicode == UnicodeType::UNICODE) {
 			has_unicode = true;
 		} else if (unicode == UnicodeType::INVALID) {
-			throw InternalException("Invalid unicode detected in segment statistics update!");
+			throw InternalException(
+			    ErrorManager::InvalidUnicodeError(string((char *)data, size), "segment statistics update"));
 		}
 	}
 }
@@ -175,8 +177,8 @@ void StringStatistics::Verify(Vector &vector, const SelectionVector &sel, idx_t 
 	string_t min_string((const char *)min, MAX_STRING_MINMAX_SIZE);
 	string_t max_string((const char *)max, MAX_STRING_MINMAX_SIZE);
 
-	VectorData vdata;
-	vector.Orrify(count, vdata);
+	UnifiedVectorFormat vdata;
+	vector.ToUnifiedFormat(count, vdata);
 	auto data = (string_t *)vdata.data;
 	for (idx_t i = 0; i < count; i++) {
 		auto idx = sel.get_index(i);

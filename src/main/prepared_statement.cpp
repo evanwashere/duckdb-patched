@@ -6,15 +6,25 @@
 namespace duckdb {
 
 PreparedStatement::PreparedStatement(shared_ptr<ClientContext> context, shared_ptr<PreparedStatementData> data_p,
-                                     string query, idx_t n_param)
-    : context(move(context)), data(move(data_p)), query(move(query)), success(true), n_param(n_param) {
+                                     string query, idx_t n_param, case_insensitive_map_t<idx_t> named_param_pam_p)
+    : context(std::move(context)), data(std::move(data_p)), query(std::move(query)), success(true), n_param(n_param),
+      named_param_map(std::move(named_param_pam_p)) {
 	D_ASSERT(data || !success);
 }
 
-PreparedStatement::PreparedStatement(string error) : context(nullptr), success(false), error(move(error)) {
+PreparedStatement::PreparedStatement(PreservedError error) : context(nullptr), success(false), error(std::move(error)) {
 }
 
 PreparedStatement::~PreparedStatement() {
+}
+
+const string &PreparedStatement::GetError() {
+	D_ASSERT(HasError());
+	return error.Message();
+}
+
+bool PreparedStatement::HasError() const {
+	return !success;
 }
 
 idx_t PreparedStatement::ColumnCount() {
@@ -42,10 +52,23 @@ const vector<string> &PreparedStatement::GetNames() {
 	return data->names;
 }
 
+vector<LogicalType> PreparedStatement::GetExpectedParameterTypes() const {
+	D_ASSERT(data);
+	vector<LogicalType> expected_types(data->value_map.size());
+	for (auto &it : data->value_map) {
+		D_ASSERT(it.first >= 1);
+		idx_t param_index = it.first - 1;
+		D_ASSERT(param_index < expected_types.size());
+		D_ASSERT(it.second);
+		expected_types[param_index] = it.second->value.type();
+	}
+	return expected_types;
+}
+
 unique_ptr<QueryResult> PreparedStatement::Execute(vector<Value> &values, bool allow_stream_result) {
 	auto pending = PendingQuery(values, allow_stream_result);
-	if (!pending->success) {
-		return make_unique<MaterializedQueryResult>(pending->error);
+	if (pending->HasError()) {
+		return make_unique<MaterializedQueryResult>(pending->GetErrorObject());
 	}
 	return pending->Execute();
 }

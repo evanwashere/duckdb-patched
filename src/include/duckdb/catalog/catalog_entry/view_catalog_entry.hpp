@@ -21,6 +21,10 @@ struct CreateViewInfo;
 //! A view catalog entry
 class ViewCatalogEntry : public StandardEntry {
 public:
+	static constexpr const CatalogType Type = CatalogType::VIEW_ENTRY;
+	static constexpr const char *Name = "view";
+
+public:
 	//! Create a real TableCatalogEntry and initialize storage for it
 	ViewCatalogEntry(Catalog *catalog, SchemaCatalogEntry *schema, CreateViewInfo *info);
 
@@ -39,7 +43,7 @@ public:
 	//! Serialize the meta information of the ViewCatalogEntry a serializer
 	virtual void Serialize(Serializer &serializer);
 	//! Deserializes to a CreateTableInfo
-	static unique_ptr<CreateViewInfo> Deserialize(Deserializer &source);
+	static unique_ptr<CreateViewInfo> Deserialize(Deserializer &source, ClientContext &context);
 
 	unique_ptr<CatalogEntry> Copy(ClientContext &context) override;
 

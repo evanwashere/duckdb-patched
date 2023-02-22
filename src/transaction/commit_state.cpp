@@ -1,7 +1,9 @@
 #include "duckdb/transaction/commit_state.hpp"
 
+#include "duckdb/catalog/catalog_entry/duck_table_entry.hpp"
 #include "duckdb/catalog/catalog_entry/type_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_set.hpp"
+#include "duckdb/catalog/duck_catalog.hpp"
 #include "duckdb/common/serializer/buffered_deserializer.hpp"
 #include "duckdb/parser/parsed_data/alter_table_info.hpp"
 #include "duckdb/storage/data_table.hpp"
@@ -17,8 +19,8 @@
 
 namespace duckdb {
 
-CommitState::CommitState(transaction_t commit_id, WriteAheadLog *log)
-    : log(log), commit_id(commit_id), current_table_info(nullptr) {
+CommitState::CommitState(ClientContext &context, transaction_t commit_id, WriteAheadLog *log)
+    : log(log), commit_id(commit_id), current_table_info(nullptr), context(context) {
 }
 
 void CommitState::SwitchTable(DataTableInfo *table_info, UndoFlags new_op) {
@@ -39,7 +41,8 @@ void CommitState::WriteCatalogEntry(CatalogEntry *entry, data_ptr_t dataptr) {
 	switch (parent->type) {
 	case CatalogType::TABLE_ENTRY:
 		if (entry->type == CatalogType::TABLE_ENTRY) {
-			auto table_entry = (TableCatalogEntry *)entry;
+			auto table_entry = (DuckTableEntry *)entry;
+			D_ASSERT(table_entry->IsDuckTable());
 			// ALTER TABLE statement, read the extra data after the entry
 			auto extra_data_size = Load<idx_t>(dataptr);
 			auto extra_data = (data_ptr_t)(dataptr + sizeof(idx_t));
@@ -84,14 +87,17 @@ void CommitState::WriteCatalogEntry(CatalogEntry *entry, data_ptr_t dataptr) {
 	case CatalogType::TABLE_MACRO_ENTRY:
 		log->WriteCreateTableMacro((TableMacroCatalogEntry *)parent);
 		break;
-
+	case CatalogType::INDEX_ENTRY:
+		log->WriteCreateIndex((IndexCatalogEntry *)parent);
+		break;
 	case CatalogType::TYPE_ENTRY:
 		log->WriteCreateType((TypeCatalogEntry *)parent);
 		break;
 	case CatalogType::DELETED_ENTRY:
 		switch (entry->type) {
 		case CatalogType::TABLE_ENTRY: {
-			auto table_entry = (TableCatalogEntry *)entry;
+			auto table_entry = (DuckTableEntry *)entry;
+			D_ASSERT(table_entry->IsDuckTable());
 			table_entry->CommitDrop();
 			log->WriteDropTable(table_entry);
 			break;
@@ -115,6 +121,8 @@ void CommitState::WriteCatalogEntry(CatalogEntry *entry, data_ptr_t dataptr) {
 			log->WriteDropType((TypeCatalogEntry *)entry);
 			break;
 		case CatalogType::INDEX_ENTRY:
+			log->WriteDropIndex((IndexCatalogEntry *)entry);
+			break;
 		case CatalogType::PREPARED_STATEMENT:
 		case CatalogType::SCALAR_FUNCTION_ENTRY:
 			// do nothing, indexes/prepared statements/functions aren't persisted to disk
@@ -123,7 +131,6 @@ void CommitState::WriteCatalogEntry(CatalogEntry *entry, data_ptr_t dataptr) {
 			throw InternalException("Don't know how to drop this type!");
 		}
 		break;
-	case CatalogType::INDEX_ENTRY:
 	case CatalogType::PREPARED_STATEMENT:
 	case CatalogType::AGGREGATE_FUNCTION_ENTRY:
 	case CatalogType::SCALAR_FUNCTION_ENTRY:
@@ -146,7 +153,7 @@ void CommitState::WriteDelete(DeleteInfo *info) {
 	if (!delete_chunk) {
 		delete_chunk = make_unique<DataChunk>();
 		vector<LogicalType> delete_types = {LogicalType::ROW_TYPE};
-		delete_chunk->Initialize(delete_types);
+		delete_chunk->Initialize(Allocator::DefaultAllocator(), delete_types);
 	}
 	auto rows = FlatVector::GetData<row_t>(delete_chunk->data[0]);
 	for (idx_t i = 0; i < info->count; i++) {
@@ -174,7 +181,7 @@ void CommitState::WriteUpdate(UpdateInfo *info) {
 	update_types.emplace_back(LogicalType::ROW_TYPE);
 
 	update_chunk = make_unique<DataChunk>();
-	update_chunk->Initialize(update_types);
+	update_chunk->Initialize(Allocator::DefaultAllocator(), update_types);
 
 	// fetch the updated values from the base segment
 	info->segment->FetchCommitted(info->vector_index, update_chunk->data[0]);
@@ -217,6 +224,14 @@ void CommitState::CommitEntry(UndoFlags type, data_ptr_t data) {
 		// set the commit timestamp of the catalog entry to the given id
 		auto catalog_entry = Load<CatalogEntry *>(data);
 		D_ASSERT(catalog_entry->parent);
+
+		auto &catalog = catalog_entry->catalog;
+		D_ASSERT(catalog);
+		D_ASSERT(catalog->IsDuckCatalog());
+
+		// Grab a write lock on the catalog
+		auto &duck_catalog = (DuckCatalog &)*catalog;
+		lock_guard<mutex> write_lock(duck_catalog.GetWriteLock());
 		catalog_entry->set->UpdateTimestamp(catalog_entry->parent, commit_id);
 		if (catalog_entry->name != catalog_entry->parent->name) {
 			catalog_entry->set->UpdateTimestamp(catalog_entry, commit_id);

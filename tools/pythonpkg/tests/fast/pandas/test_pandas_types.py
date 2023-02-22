@@ -1,6 +1,8 @@
 import duckdb
 import pandas as pd
 import numpy
+import string
+from packaging import version
 
 def round_trip(data,pandas_type):
     df_in = pd.DataFrame({
@@ -13,6 +15,56 @@ def round_trip(data,pandas_type):
     assert df_out.equals(df_in)
 
 class TestPandasTypes(object):
+    def test_pandas_numeric(self):
+        base_df = pd.DataFrame(
+            {'a':range(10)}
+        )
+
+        data_types = [
+            "uint8",
+            "UInt8",
+            "uint16",
+            "UInt16",
+            "uint32",
+            "UInt32",
+            "uint64",
+            "UInt64",
+            "int8",
+            "Int8",
+            "int16",
+            "Int16",
+            "int32",
+            "Int32",
+            "int64",
+            "Int64",
+            "float32",
+            "float64",
+        ]
+
+        if version.parse(pd.__version__) >= version.parse('1.2.0'):
+	        # These DTypes where added in 1.2.0
+            data_types.extend([
+                "Float32",
+                "Float64"
+            ])
+        # Generate a dataframe with all the types, in the form of:
+        # b=type1,
+        # c=type2
+        # ..
+        data = {}
+        for letter, dtype in zip(string.ascii_lowercase, data_types):
+            data[letter] = base_df.a.astype(dtype)
+
+        df = pd.DataFrame.from_dict(data)
+        conn = duckdb.connect()
+        out_df = conn.execute('select * from df').df()
+
+        # Verify that the types in the out_df are correct
+        # FIXME: we don't support outputting pandas specific types (i.e UInt64)
+        for letter, item in zip(string.ascii_lowercase, data_types):
+            column_name = letter
+            assert(str(out_df[column_name].dtype) == item.lower())
+
     def test_pandas_unsigned(self, duckdb_cursor):
         unsigned_types = ['uint8','uint16','uint32','uint64']
         data = numpy.array([0,1,2,3])
@@ -49,6 +101,19 @@ class TestPandasTypes(object):
         assert df_out['object'][2] == df_in['object'][2]
         assert numpy.isnan(df_out['object'][3])
 
+    def test_pandas_float64(self):
+        data = numpy.array([0.233, numpy.nan, 3456.2341231, float('-inf'), -23424.45345, float('+inf'), 0.0000000001])
+        df_in = pd.DataFrame({
+            'object': pd.Series(data, dtype='float64'),
+        })
+        df_out = duckdb.query_df(df_in, "data", "SELECT * FROM data").df()
+        
+        for i in range(len(data)):
+            if (numpy.isnan(df_out['object'][i])):
+                assert(i == 1)
+                continue
+            assert df_out['object'][i] == df_in['object'][i]
+
     def test_pandas_interval(self, duckdb_cursor):
         if pd. __version__ != '1.2.4':
             return
@@ -69,6 +134,6 @@ class TestPandasTypes(object):
         expected_result = data[0]
         df_in = pd.DataFrame({'object': pd.Series(data, dtype='object')})
         result = duckdb.query_df(df_in, "data", "SELECT * FROM data").fetchone()[0]
-        assert result == str(expected_result)
+        assert result == expected_result
 
 

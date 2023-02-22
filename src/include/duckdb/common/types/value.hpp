@@ -12,11 +12,17 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/types.hpp"
 #include "duckdb/common/winapi.hpp"
+#include "duckdb/common/types/timestamp.hpp"
+#include "duckdb/common/types/date.hpp"
+#include "duckdb/common/types/datetime.hpp"
+#include "duckdb/common/types/interval.hpp"
 
 namespace duckdb {
 
+class CastFunctionSet;
 class Deserializer;
 class Serializer;
+struct GetCastFunctionInput;
 
 //! The Value object holds a single arbitrary value of any type that can be
 //! stored in the database.
@@ -24,6 +30,7 @@ class Value {
 	friend struct StringValue;
 	friend struct StructValue;
 	friend struct ListValue;
+	friend struct UnionValue;
 
 public:
 	//! Create an empty NULL value of the specified type
@@ -56,6 +63,9 @@ public:
 	// move assignment
 	DUCKDB_API Value &operator=(Value &&other) noexcept;
 
+	inline LogicalType &GetTypeMutable() {
+		return type_;
+	}
 	inline const LogicalType &type() const {
 		return type_;
 	}
@@ -121,10 +131,6 @@ public:
 	                                  int32_t micros);
 	DUCKDB_API static Value INTERVAL(int32_t months, int32_t days, int64_t micros);
 	DUCKDB_API static Value INTERVAL(interval_t interval);
-	//! Creates a JSON Value
-	DUCKDB_API static Value JSON(const char *val);
-	DUCKDB_API static Value JSON(string_t val);
-	DUCKDB_API static Value JSON(string val);
 
 	// Create a enum Value from a specified uint value
 	DUCKDB_API static Value ENUM(uint64_t value, const LogicalType &original_type);
@@ -147,8 +153,10 @@ public:
 	DUCKDB_API static Value LIST(LogicalType child_type, vector<Value> values);
 	//! Create an empty list with the specified child-type
 	DUCKDB_API static Value EMPTYLIST(LogicalType child_type);
-	//! Create a map value from a (key, value) pair
-	DUCKDB_API static Value MAP(Value key, Value value);
+	//! Create a map value with the given entries
+	DUCKDB_API static Value MAP(LogicalType child_type, vector<Value> values);
+	//! Create a union value from a selected value and a tag from a set of alternatives.
+	DUCKDB_API static Value UNION(child_list_t<LogicalType> members, uint8_t tag, Value value);
 
 	//! Create a blob Value from a data pointer and a length: no bytes are interpreted
 	DUCKDB_API static Value BLOB(const_data_ptr_t data, idx_t len);
@@ -157,6 +165,9 @@ public:
 	}
 	//! Creates a blob by casting a specified string to a blob (i.e. interpreting \x characters)
 	DUCKDB_API static Value BLOB(const string &data);
+	//! Creates a bitstring by casting a specified string to a bitstring
+	DUCKDB_API static Value BIT(const_data_ptr_t data, idx_t len);
+	DUCKDB_API static Value BIT(const string &data);
 
 	template <class T>
 	T GetValue() const {
@@ -193,12 +204,24 @@ public:
 	DUCKDB_API uintptr_t GetPointer() const;
 
 	//! Cast this value to another type, throws exception if its not possible
-	DUCKDB_API Value CastAs(const LogicalType &target_type, bool strict = false) const;
+	DUCKDB_API Value CastAs(CastFunctionSet &set, GetCastFunctionInput &get_input, const LogicalType &target_type,
+	                        bool strict = false) const;
+	DUCKDB_API Value CastAs(ClientContext &context, const LogicalType &target_type, bool strict = false) const;
+	DUCKDB_API Value DefaultCastAs(const LogicalType &target_type, bool strict = false) const;
 	//! Tries to cast this value to another type, and stores the result in "new_value"
-	DUCKDB_API bool TryCastAs(const LogicalType &target_type, Value &new_value, string *error_message,
-	                          bool strict = false) const;
+	DUCKDB_API bool TryCastAs(CastFunctionSet &set, GetCastFunctionInput &get_input, const LogicalType &target_type,
+	                          Value &new_value, string *error_message, bool strict = false) const;
+	DUCKDB_API bool TryCastAs(ClientContext &context, const LogicalType &target_type, Value &new_value,
+	                          string *error_message, bool strict = false) const;
+	DUCKDB_API bool DefaultTryCastAs(const LogicalType &target_type, Value &new_value, string *error_message,
+	                                 bool strict = false) const;
 	//! Tries to cast this value to another type, and stores the result in THIS value again
-	DUCKDB_API bool TryCastAs(const LogicalType &target_type, bool strict = false);
+	DUCKDB_API bool TryCastAs(CastFunctionSet &set, GetCastFunctionInput &get_input, const LogicalType &target_type,
+	                          bool strict = false);
+	DUCKDB_API bool TryCastAs(ClientContext &context, const LogicalType &target_type, bool strict = false);
+	DUCKDB_API bool DefaultTryCastAs(const LogicalType &target_type, bool strict = false);
+
+	DUCKDB_API void Reinterpret(LogicalType new_type);
 
 	//! Serializes a Value to a stand-alone binary blob
 	DUCKDB_API void Serialize(Serializer &serializer) const;
@@ -239,7 +262,10 @@ public:
 
 	//! Returns true if the values are (approximately) equivalent. Note this is NOT the SQL equivalence. For this
 	//! function, NULL values are equivalent and floating point values that are close are equivalent.
-	DUCKDB_API static bool ValuesAreEqual(const Value &result_value, const Value &value);
+	DUCKDB_API static bool ValuesAreEqual(CastFunctionSet &set, GetCastFunctionInput &get_input,
+	                                      const Value &result_value, const Value &value);
+	DUCKDB_API static bool ValuesAreEqual(ClientContext &context, const Value &result_value, const Value &value);
+	DUCKDB_API static bool DefaultValuesAreEqual(const Value &result_value, const Value &value);
 	//! Returns true if the values are not distinct from each other, following SQL semantics for NOT DISTINCT FROM.
 	DUCKDB_API static bool NotDistinctFrom(const Value &lvalue, const Value &rvalue);
 
@@ -373,6 +399,11 @@ struct ListValue {
 	DUCKDB_API static const vector<Value> &GetChildren(const Value &value);
 };
 
+struct UnionValue {
+	DUCKDB_API static const Value &GetValue(const Value &value);
+	DUCKDB_API static uint8_t GetTag(const Value &value);
+};
+
 //! Return the internal integral value for any type that is stored as an integral value internally
 //! This can be used on values of type integer, uinteger, but also date, timestamp, decimal, etc
 struct IntegralValue {
@@ -404,7 +435,17 @@ Value DUCKDB_API Value::CreateValue(date_t value);
 template <>
 Value DUCKDB_API Value::CreateValue(dtime_t value);
 template <>
+Value DUCKDB_API Value::CreateValue(dtime_tz_t value);
+template <>
 Value DUCKDB_API Value::CreateValue(timestamp_t value);
+template <>
+Value DUCKDB_API Value::CreateValue(timestamp_sec_t value);
+template <>
+Value DUCKDB_API Value::CreateValue(timestamp_ms_t value);
+template <>
+Value DUCKDB_API Value::CreateValue(timestamp_ns_t value);
+template <>
+Value DUCKDB_API Value::CreateValue(timestamp_tz_t value);
 template <>
 Value DUCKDB_API Value::CreateValue(const char *value);
 template <>

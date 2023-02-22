@@ -13,16 +13,27 @@ PhysicalTableScan::PhysicalTableScan(vector<LogicalType> types, TableFunction fu
                                      unique_ptr<FunctionData> bind_data_p, vector<column_t> column_ids_p,
                                      vector<string> names_p, unique_ptr<TableFilterSet> table_filters_p,
                                      idx_t estimated_cardinality)
-    : PhysicalOperator(PhysicalOperatorType::TABLE_SCAN, move(types), estimated_cardinality),
-      function(move(function_p)), bind_data(move(bind_data_p)), column_ids(move(column_ids_p)), names(move(names_p)),
-      table_filters(move(table_filters_p)) {
+    : PhysicalOperator(PhysicalOperatorType::TABLE_SCAN, std::move(types), estimated_cardinality),
+      function(std::move(function_p)), bind_data(std::move(bind_data_p)), column_ids(std::move(column_ids_p)),
+      names(std::move(names_p)), table_filters(std::move(table_filters_p)) {
+}
+
+PhysicalTableScan::PhysicalTableScan(vector<LogicalType> types, TableFunction function_p,
+                                     unique_ptr<FunctionData> bind_data_p, vector<LogicalType> returned_types_p,
+                                     vector<column_t> column_ids_p, vector<idx_t> projection_ids_p,
+                                     vector<string> names_p, unique_ptr<TableFilterSet> table_filters_p,
+                                     idx_t estimated_cardinality)
+    : PhysicalOperator(PhysicalOperatorType::TABLE_SCAN, std::move(types), estimated_cardinality),
+      function(std::move(function_p)), bind_data(std::move(bind_data_p)), returned_types(std::move(returned_types_p)),
+      column_ids(std::move(column_ids_p)), projection_ids(std::move(projection_ids_p)), names(std::move(names_p)),
+      table_filters(std::move(table_filters_p)) {
 }
 
 class TableScanGlobalSourceState : public GlobalSourceState {
 public:
 	TableScanGlobalSourceState(ClientContext &context, const PhysicalTableScan &op) {
 		if (op.function.init_global) {
-			TableFunctionInitInput input(op.bind_data.get(), op.column_ids, op.table_filters.get());
+			TableFunctionInitInput input(op.bind_data.get(), op.column_ids, op.projection_ids, op.table_filters.get());
 			global_state = op.function.init_global(context, input);
 			if (global_state) {
 				max_threads = global_state->MaxThreads();
@@ -45,8 +56,8 @@ public:
 	TableScanLocalSourceState(ExecutionContext &context, TableScanGlobalSourceState &gstate,
 	                          const PhysicalTableScan &op) {
 		if (op.function.init_local) {
-			TableFunctionInitInput input(op.bind_data.get(), op.column_ids, op.table_filters.get());
-			local_state = op.function.init_local(context.client, input, gstate.global_state.get());
+			TableFunctionInitInput input(op.bind_data.get(), op.column_ids, op.projection_ids, op.table_filters.get());
+			local_state = op.function.init_local(context, input, gstate.global_state.get());
 		}
 	}
 
@@ -102,12 +113,13 @@ string PhysicalTableScan::ParamsToString() const {
 		result += "\n[INFOSEPARATOR]\n";
 	}
 	if (function.projection_pushdown) {
-		for (idx_t i = 0; i < column_ids.size(); i++) {
-			if (column_ids[i] < names.size()) {
+		for (idx_t i = 0; i < projection_ids.size(); i++) {
+			const auto &column_id = column_ids[projection_ids[i]];
+			if (column_id < names.size()) {
 				if (i > 0) {
 					result += "\n";
 				}
-				result += names[column_ids[i]];
+				result += names[column_id];
 			}
 		}
 	}
@@ -123,6 +135,8 @@ string PhysicalTableScan::ParamsToString() const {
 			}
 		}
 	}
+	result += "\n[INFOSEPARATOR]\n";
+	result += StringUtil::Format("EC: %llu", estimated_props->GetCardinality<idx_t>());
 	return result;
 }
 

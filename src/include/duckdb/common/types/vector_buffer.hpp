@@ -12,19 +12,20 @@
 #include "duckdb/common/types/selection_vector.hpp"
 #include "duckdb/common/types/string_heap.hpp"
 #include "duckdb/common/types/string_type.hpp"
+#include "duckdb/storage/buffer/buffer_handle.hpp"
 
 namespace duckdb {
 
 class BufferHandle;
 class VectorBuffer;
 class Vector;
-class ChunkCollection;
 
 enum class VectorBufferType : uint8_t {
 	STANDARD_BUFFER,     // standard buffer, holds a single array of data
 	DICTIONARY_BUFFER,   // dictionary buffer, holds a selection vector
 	VECTOR_CHILD_BUFFER, // vector child buffer: holds another vector
 	STRING_BUFFER,       // string buffer, holds a string heap
+	FSST_BUFFER,         // fsst compressed string buffer, holds a string heap, fsst symbol table and a string count
 	STRUCT_BUFFER,       // struct buffer, holds a ordered mapping from name to child vector
 	LIST_BUFFER,         // list buffer, holds a single flatvector child
 	MANAGED_BUFFER,      // managed buffer, holds a buffer managed by the buffermanager
@@ -57,7 +58,7 @@ public:
 		}
 	}
 	explicit VectorBuffer(unique_ptr<data_t[]> data_p)
-	    : buffer_type(VectorBufferType::STANDARD_BUFFER), data(move(data_p)) {
+	    : buffer_type(VectorBufferType::STANDARD_BUFFER), data(std::move(data_p)) {
 	}
 	virtual ~VectorBuffer() {
 	}
@@ -70,7 +71,7 @@ public:
 	}
 
 	void SetData(unique_ptr<data_t[]> new_data) {
-		data = move(new_data);
+		data = std::move(new_data);
 	}
 
 	VectorAuxiliaryData *GetAuxiliaryData() {
@@ -78,7 +79,7 @@ public:
 	}
 
 	void SetAuxiliaryData(unique_ptr<VectorAuxiliaryData> aux_data_p) {
-		aux_data = move(aux_data_p);
+		aux_data = std::move(aux_data_p);
 	}
 
 	static buffer_ptr<VectorBuffer> CreateStandardVector(PhysicalType type, idx_t capacity = STANDARD_VECTOR_SIZE);
@@ -108,7 +109,7 @@ public:
 	    : VectorBuffer(VectorBufferType::DICTIONARY_BUFFER), sel_vector(sel) {
 	}
 	explicit DictionaryBuffer(buffer_ptr<SelectionData> data)
-	    : VectorBuffer(VectorBufferType::DICTIONARY_BUFFER), sel_vector(move(data)) {
+	    : VectorBuffer(VectorBufferType::DICTIONARY_BUFFER), sel_vector(std::move(data)) {
 	}
 	explicit DictionaryBuffer(idx_t count = STANDARD_VECTOR_SIZE)
 	    : VectorBuffer(VectorBufferType::DICTIONARY_BUFFER), sel_vector(count) {
@@ -132,6 +133,7 @@ private:
 class VectorStringBuffer : public VectorBuffer {
 public:
 	VectorStringBuffer();
+	VectorStringBuffer(VectorBufferType type);
 
 public:
 	string_t AddString(const char *data, idx_t len) {
@@ -148,7 +150,7 @@ public:
 	}
 
 	void AddHeapReference(buffer_ptr<VectorBuffer> heap) {
-		references.push_back(move(heap));
+		references.push_back(std::move(heap));
 	}
 
 private:
@@ -156,6 +158,29 @@ private:
 	StringHeap heap;
 	// References to additional vector buffers referenced by this string buffer
 	vector<buffer_ptr<VectorBuffer>> references;
+};
+
+class VectorFSSTStringBuffer : public VectorStringBuffer {
+public:
+	VectorFSSTStringBuffer();
+
+public:
+	void AddDecoder(buffer_ptr<void> &duckdb_fsst_decoder_p) {
+		duckdb_fsst_decoder = duckdb_fsst_decoder_p;
+	}
+	void *GetDecoder() {
+		return duckdb_fsst_decoder.get();
+	}
+	void SetCount(idx_t count) {
+		total_string_count = count;
+	}
+	idx_t GetCount() {
+		return total_string_count;
+	}
+
+private:
+	buffer_ptr<void> duckdb_fsst_decoder;
+	idx_t total_string_count = 0;
 };
 
 class VectorStructBuffer : public VectorBuffer {
@@ -206,11 +231,11 @@ private:
 //! The ManagedVectorBuffer holds a buffer handle
 class ManagedVectorBuffer : public VectorBuffer {
 public:
-	explicit ManagedVectorBuffer(unique_ptr<BufferHandle> handle);
+	explicit ManagedVectorBuffer(BufferHandle handle);
 	~ManagedVectorBuffer() override;
 
 private:
-	unique_ptr<BufferHandle> handle;
+	BufferHandle handle;
 };
 
 } // namespace duckdb

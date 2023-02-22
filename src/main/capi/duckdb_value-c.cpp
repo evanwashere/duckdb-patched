@@ -1,4 +1,4 @@
-#include "duckdb/main/capi_internal.hpp"
+#include "duckdb/main/capi/capi_internal.hpp"
 
 void duckdb_destroy_value(duckdb_value *value) {
 	if (value && *value) {
@@ -9,7 +9,7 @@ void duckdb_destroy_value(duckdb_value *value) {
 }
 
 duckdb_value duckdb_create_varchar_length(const char *text, idx_t length) {
-	return (duckdb_value) new duckdb::Value(std::string(text, length));
+	return reinterpret_cast<duckdb_value>(new duckdb::Value(std::string(text, length)));
 }
 
 duckdb_value duckdb_create_varchar(const char *text) {
@@ -18,12 +18,12 @@ duckdb_value duckdb_create_varchar(const char *text) {
 
 duckdb_value duckdb_create_int64(int64_t input) {
 	auto val = duckdb::Value::BIGINT(input);
-	return (duckdb_value) new duckdb::Value(val);
+	return reinterpret_cast<duckdb_value>(new duckdb::Value(val));
 }
 
 char *duckdb_get_varchar(duckdb_value value) {
 	auto val = (duckdb::Value *)value;
-	auto str_val = val->CastAs(duckdb::LogicalType::VARCHAR);
+	auto str_val = val->DefaultCastAs(duckdb::LogicalType::VARCHAR);
 	auto &str = duckdb::StringValue::Get(str_val);
 
 	auto result = (char *)malloc(sizeof(char *) * (str.size() + 1));
@@ -34,7 +34,7 @@ char *duckdb_get_varchar(duckdb_value value) {
 
 int64_t duckdb_get_int64(duckdb_value value) {
 	auto val = (duckdb::Value *)value;
-	if (!val->TryCastAs(duckdb::LogicalType::BIGINT)) {
+	if (!val->DefaultTryCastAs(duckdb::LogicalType::BIGINT)) {
 		return 0;
 	}
 	return duckdb::BigIntValue::Get(*val);

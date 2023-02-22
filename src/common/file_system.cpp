@@ -2,6 +2,7 @@
 
 #include "duckdb/common/checksum.hpp"
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/file_opener.hpp"
 #include "duckdb/common/helper.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/windows.hpp"
@@ -38,14 +39,27 @@ FileSystem::~FileSystem() {
 }
 
 FileSystem &FileSystem::GetFileSystem(ClientContext &context) {
-	return *context.db->config.file_system;
+	return FileSystem::GetFileSystem(*context.db);
 }
 
 FileOpener *FileSystem::GetFileOpener(ClientContext &context) {
 	return ClientData::Get(context).file_opener.get();
 }
 
+bool PathMatched(const string &path, const string &sub_path) {
+	if (path.rfind(sub_path, 0) == 0) {
+		return true;
+	}
+	return false;
+}
+
 #ifndef _WIN32
+
+bool FileSystem::IsPathAbsolute(const string &path) {
+	auto path_separator = FileSystem::PathSeparator();
+	return PathMatched(path, path_separator);
+}
+
 string FileSystem::PathSeparator() {
 	return "/";
 }
@@ -75,6 +89,27 @@ string FileSystem::GetWorkingDirectory() {
 }
 #else
 
+bool FileSystem::IsPathAbsolute(const string &path) {
+	// 1) A single backslash
+	auto sub_path = FileSystem::PathSeparator();
+	if (PathMatched(path, sub_path)) {
+		return true;
+	}
+	// 2) check if starts with a double-backslash (i.e., \\)
+	sub_path += FileSystem::PathSeparator();
+	if (PathMatched(path, sub_path)) {
+		return true;
+	}
+	// 3) A disk designator with a backslash (e.g., C:\)
+	auto path_aux = path;
+	path_aux.erase(0, 1);
+	sub_path = ":" + FileSystem::PathSeparator();
+	if (PathMatched(path_aux, sub_path)) {
+		return true;
+	}
+	return false;
+}
+
 string FileSystem::PathSeparator() {
 	return "\\";
 }
@@ -88,7 +123,7 @@ void FileSystem::SetWorkingDirectory(const string &path) {
 idx_t FileSystem::GetAvailableMemory() {
 	ULONGLONG available_memory_kb;
 	if (GetPhysicallyInstalledSystemMemory(&available_memory_kb)) {
-		return MinValue<idx_t>(available_memory_kb * 1024, UINTPTR_MAX);
+		return MinValue<idx_t>(available_memory_kb * 1000, UINTPTR_MAX);
 	}
 	// fallback: try GlobalMemoryStatusEx
 	MEMORYSTATUSEX mem_state;
@@ -137,14 +172,37 @@ string FileSystem::ConvertSeparators(const string &path) {
 	return result;
 }
 
-string FileSystem::ExtractBaseName(const string &path) {
+string FileSystem::ExtractName(const string &path) {
+	if (path.empty()) {
+		return string();
+	}
 	auto normalized_path = ConvertSeparators(path);
 	auto sep = PathSeparator();
-	auto vec = StringUtil::Split(StringUtil::Split(normalized_path, sep).back(), ".");
+	auto splits = StringUtil::Split(normalized_path, sep);
+	D_ASSERT(!splits.empty());
+	return splits.back();
+}
+
+string FileSystem::ExtractBaseName(const string &path) {
+	if (path.empty()) {
+		return string();
+	}
+	auto vec = StringUtil::Split(ExtractName(path), ".");
+	D_ASSERT(!vec.empty());
 	return vec[0];
 }
 
-string FileSystem::GetHomeDirectory() {
+string FileSystem::GetHomeDirectory(FileOpener *opener) {
+	// read the home_directory setting first, if it is set
+	if (opener) {
+		Value result;
+		if (opener->TryGetCurrentSetting("home_directory", result)) {
+			if (!result.IsNull() && !result.ToString().empty()) {
+				return result.ToString();
+			}
+		}
+	}
+	// fallback to the default home directories for the specified system
 #ifdef DUCKDB_WINDOWS
 	const char *homedir = getenv("USERPROFILE");
 #else
@@ -154,6 +212,16 @@ string FileSystem::GetHomeDirectory() {
 		return homedir;
 	}
 	return string();
+}
+
+string FileSystem::ExpandPath(const string &path, FileOpener *opener) {
+	if (path.empty()) {
+		return path;
+	}
+	if (path[0] == '~') {
+		return GetHomeDirectory(opener) + path.substr(1);
+	}
+	return path;
 }
 
 // LCOV_EXCL_START
@@ -176,6 +244,14 @@ int64_t FileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes) {
 
 int64_t FileSystem::Write(FileHandle &handle, void *buffer, int64_t nr_bytes) {
 	throw NotImplementedException("%s: Write is not implemented!", GetName());
+}
+
+string FileSystem::GetFileExtension(FileHandle &handle) {
+	auto dot_location = handle.path.rfind('.');
+	if (dot_location != std::string::npos) {
+		return handle.path.substr(dot_location + 1, std::string::npos);
+	}
+	return string();
 }
 
 int64_t FileSystem::GetFileSize(FileHandle &handle) {
@@ -206,7 +282,8 @@ void FileSystem::RemoveDirectory(const string &directory) {
 	throw NotImplementedException("%s: RemoveDirectory is not implemented!", GetName());
 }
 
-bool FileSystem::ListFiles(const string &directory, const std::function<void(const string &, bool)> &callback) {
+bool FileSystem::ListFiles(const string &directory, const std::function<void(const string &, bool)> &callback,
+                           FileOpener *opener) {
 	throw NotImplementedException("%s: ListFiles is not implemented!", GetName());
 }
 
@@ -246,8 +323,30 @@ void FileSystem::RegisterSubSystem(FileCompressionType compression_type, unique_
 	throw NotImplementedException("%s: Can't register a sub system on a non-virtual file system", GetName());
 }
 
+void FileSystem::UnregisterSubSystem(const string &name) {
+	throw NotImplementedException("%s: Can't unregister a sub system on a non-virtual file system", GetName());
+}
+
+vector<string> FileSystem::ListSubSystems() {
+	throw NotImplementedException("%s: Can't list sub systems on a non-virtual file system", GetName());
+}
+
 bool FileSystem::CanHandleFile(const string &fpath) {
 	throw NotImplementedException("%s: CanHandleFile is not implemented!", GetName());
+}
+
+IOException FileSystem::MissingFileException(const string &file_path, ClientContext &context) {
+	const string prefixes[] = {"http://", "https://", "s3://"};
+	for (auto &prefix : prefixes) {
+		if (StringUtil::StartsWith(file_path, prefix)) {
+			if (!context.db->LoadedExtensions().count("httpfs")) {
+				return MissingExtensionException("No files found that match the pattern \"%s\", because the httpfs "
+				                                 "extension is not loaded. Try loading the extension: LOAD HTTPFS",
+				                                 file_path);
+			}
+		}
+	}
+	return IOException("No files found that match the pattern \"%s\"", file_path);
 }
 
 void FileSystem::Seek(FileHandle &handle, idx_t location) {
@@ -275,7 +374,7 @@ bool FileSystem::OnDiskFile(FileHandle &handle) {
 }
 // LCOV_EXCL_STOP
 
-FileHandle::FileHandle(FileSystem &file_system, string path_p) : file_system(file_system), path(move(path_p)) {
+FileHandle::FileHandle(FileSystem &file_system, string path_p) : file_system(file_system), path(std::move(path_p)) {
 }
 
 FileHandle::~FileHandle() {

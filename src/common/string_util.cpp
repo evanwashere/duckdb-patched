@@ -1,8 +1,8 @@
 #include "duckdb/common/string_util.hpp"
+
+#include "duckdb/common/exception.hpp"
 #include "duckdb/common/pair.hpp"
 #include "duckdb/common/to_string.hpp"
-#include "duckdb/common/string_util.hpp"
-#include "duckdb/common/exception.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -20,7 +20,7 @@ bool StringUtil::Contains(const string &haystack, const string &needle) {
 
 void StringUtil::LTrim(string &str) {
 	auto it = str.begin();
-	while (CharacterIsSpace(*it)) {
+	while (it != str.end() && CharacterIsSpace(*it)) {
 		it++;
 	}
 	str.erase(str.begin(), it);
@@ -29,6 +29,13 @@ void StringUtil::LTrim(string &str) {
 // Remove trailing ' ', '\f', '\n', '\r', '\t', '\v'
 void StringUtil::RTrim(string &str) {
 	str.erase(find_if(str.rbegin(), str.rend(), [](int ch) { return ch > 0 && !CharacterIsSpace(ch); }).base(),
+	          str.end());
+}
+
+void StringUtil::RTrim(string &str, const string &chars_to_trim) {
+	str.erase(find_if(str.rbegin(), str.rend(),
+	                  [&chars_to_trim](int ch) { return ch > 0 && chars_to_trim.find(ch) == string::npos; })
+	              .base(),
 	          str.end());
 }
 
@@ -166,6 +173,10 @@ string StringUtil::Lower(const string &str) {
 	return (copy);
 }
 
+bool StringUtil::CIEquals(const string &l1, const string &l2) {
+	return StringUtil::Lower(l1) == StringUtil::Lower(l2);
+}
+
 vector<string> StringUtil::Split(const string &input, const string &split) {
 	vector<string> splits;
 
@@ -189,6 +200,9 @@ vector<string> StringUtil::Split(const string &input, const string &split) {
 }
 
 string StringUtil::Replace(string source, const string &from, const string &to) {
+	if (from.empty()) {
+		throw InternalException("Invalid argument to StringUtil::Replace - empty FROM");
+	}
 	idx_t start_pos = 0;
 	while ((start_pos = source.find(from, start_pos)) != string::npos) {
 		source.replace(start_pos, from.length(), to);
@@ -202,8 +216,9 @@ vector<string> StringUtil::TopNStrings(vector<pair<string, idx_t>> scores, idx_t
 	if (scores.empty()) {
 		return vector<string>();
 	}
-	sort(scores.begin(), scores.end(),
-	     [](const pair<string, idx_t> &a, const pair<string, idx_t> &b) -> bool { return a.second < b.second; });
+	sort(scores.begin(), scores.end(), [](const pair<string, idx_t> &a, const pair<string, idx_t> &b) -> bool {
+		return a.second < b.second || (a.second == b.second && a.first.size() < b.first.size());
+	});
 	vector<string> result;
 	result.push_back(scores[0].first);
 	for (idx_t i = 1; i < MinValue<idx_t>(scores.size(), n); i++) {
@@ -275,7 +290,11 @@ vector<string> StringUtil::TopNLevenshtein(const vector<string> &strings, const 
 	vector<pair<string, idx_t>> scores;
 	scores.reserve(strings.size());
 	for (auto &str : strings) {
-		scores.emplace_back(str, LevenshteinDistance(str, target));
+		if (target.size() < str.size()) {
+			scores.emplace_back(str, LevenshteinDistance(str.substr(0, target.size()), target));
+		} else {
+			scores.emplace_back(str, LevenshteinDistance(str, target));
+		}
 	}
 	return TopNStrings(scores, n, threshold);
 }

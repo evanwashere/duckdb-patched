@@ -1,18 +1,21 @@
-#include "duckdb/function/scalar/generic_functions.hpp"
-#include "duckdb/main/database.hpp"
-#include "duckdb/main/client_context.hpp"
-#include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/catalog/catalog_entry/aggregate_function_catalog_entry.hpp"
+#include "duckdb/function/scalar/generic_functions.hpp"
+#include "duckdb/main/client_context.hpp"
+#include "duckdb/main/database.hpp"
+#include "duckdb/planner/expression/bound_aggregate_expression.hpp"
+#include "duckdb/planner/expression/bound_constant_expression.hpp"
+#include "duckdb/planner/expression/bound_function_expression.hpp"
+#include "duckdb/function/function_binder.hpp"
 
 namespace duckdb {
 
 // aggregate state export
 struct ExportAggregateBindData : public FunctionData {
-	AggregateFunction &aggr;
+	AggregateFunction aggr;
 	idx_t state_size;
 
-	explicit ExportAggregateBindData(AggregateFunction &aggr_p, idx_t state_size_p)
-	    : aggr(aggr_p), state_size(state_size_p) {
+	explicit ExportAggregateBindData(AggregateFunction aggr_p, idx_t state_size_p)
+	    : aggr(std::move(aggr_p)), state_size(state_size_p) {
 	}
 
 	unique_ptr<FunctionData> Copy() const override {
@@ -44,7 +47,8 @@ struct CombineState : public FunctionLocalState {
 	}
 };
 
-static unique_ptr<FunctionLocalState> InitCombineState(const BoundFunctionExpression &expr, FunctionData *bind_data_p) {
+static unique_ptr<FunctionLocalState> InitCombineState(ExpressionState &state, const BoundFunctionExpression &expr,
+                                                       FunctionData *bind_data_p) {
 	auto &bind_data = *(ExportAggregateBindData *)bind_data_p;
 	return make_unique<CombineState>(bind_data.state_size);
 }
@@ -61,7 +65,7 @@ struct FinalizeState : public FunctionLocalState {
 	}
 };
 
-static unique_ptr<FunctionLocalState> InitFinalizeState(const BoundFunctionExpression &expr,
+static unique_ptr<FunctionLocalState> InitFinalizeState(ExpressionState &state, const BoundFunctionExpression &expr,
                                                         FunctionData *bind_data_p) {
 	auto &bind_data = *(ExportAggregateBindData *)bind_data_p;
 	return make_unique<FinalizeState>(bind_data.state_size);
@@ -78,8 +82,8 @@ static void AggregateStateFinalize(DataChunk &input, ExpressionState &state_p, V
 
 	auto state_vec_ptr = FlatVector::GetData<data_ptr_t>(local_state.addresses);
 
-	VectorData state_data;
-	input.data[0].Orrify(input.size(), state_data);
+	UnifiedVectorFormat state_data;
+	input.data[0].ToUnifiedFormat(input.size(), state_data);
 	for (idx_t i = 0; i < input.size(); i++) {
 		auto state_idx = state_data.sel->get_index(i);
 		auto state_entry = &((string_t *)state_data.data)[state_idx];
@@ -96,7 +100,7 @@ static void AggregateStateFinalize(DataChunk &input, ExpressionState &state_p, V
 		state_vec_ptr[i] = (data_ptr_t)target_ptr;
 	}
 
-	AggregateInputData aggr_input_data(nullptr);
+	AggregateInputData aggr_input_data(nullptr, Allocator::DefaultAllocator());
 	bind_data.aggr.finalize(local_state.addresses, aggr_input_data, result, input.size(), 0);
 
 	for (idx_t i = 0; i < input.size(); i++) {
@@ -122,9 +126,9 @@ static void AggregateStateCombine(DataChunk &input, ExpressionState &state_p, Ve
 		                  input.data[0].GetType().ToString(), input.data[1].GetType().ToString());
 	}
 
-	VectorData state0_data, state1_data;
-	input.data[0].Orrify(input.size(), state0_data);
-	input.data[1].Orrify(input.size(), state1_data);
+	UnifiedVectorFormat state0_data, state1_data;
+	input.data[0].ToUnifiedFormat(input.size(), state0_data);
+	input.data[1].ToUnifiedFormat(input.size(), state1_data);
 
 	auto result_ptr = FlatVector::GetData<string_t>(result);
 
@@ -160,7 +164,7 @@ static void AggregateStateCombine(DataChunk &input, ExpressionState &state_p, Ve
 		memcpy(local_state.state_buffer0.get(), state0.GetDataUnsafe(), bind_data.state_size);
 		memcpy(local_state.state_buffer1.get(), state1.GetDataUnsafe(), bind_data.state_size);
 
-		AggregateInputData aggr_input_data(nullptr);
+		AggregateInputData aggr_input_data(nullptr, Allocator::DefaultAllocator());
 		bind_data.aggr.combine(local_state.state_vector0, local_state.state_vector1, aggr_input_data, 1);
 
 		result_ptr[i] =
@@ -189,25 +193,42 @@ static unique_ptr<FunctionData> BindAggregateState(ClientContext &context, Scala
 		                      arguments[0]->return_type.ToString(), arguments[1]->return_type.ToString());
 	}
 
-	// following error states are only reachable when someone messes up creating the state_type which is impossible from
-	// SQL
+	// following error states are only reachable when someone messes up creating the state_type
+	// which is impossible from SQL
 
 	auto state_type = AggregateStateType::GetStateType(arg_return_type);
 
 	// now we can look up the function in the catalog again and bind it
-	auto func = Catalog::GetCatalog(context).GetEntry(context, CatalogType::SCALAR_FUNCTION_ENTRY, DEFAULT_SCHEMA,
-	                                                  state_type.function_name);
+	auto func = Catalog::GetSystemCatalog(context).GetEntry(context, CatalogType::SCALAR_FUNCTION_ENTRY, DEFAULT_SCHEMA,
+	                                                        state_type.function_name);
 	if (func->type != CatalogType::AGGREGATE_FUNCTION_ENTRY) {
 		throw InternalException("Could not find aggregate %s", state_type.function_name);
 	}
 	auto aggr = (AggregateFunctionCatalogEntry *)func;
 
 	string error;
-	idx_t best_function = Function::BindFunction(aggr->name, aggr->functions, state_type.bound_argument_types, error);
+
+	FunctionBinder function_binder(context);
+	idx_t best_function =
+	    function_binder.BindFunction(aggr->name, aggr->functions, state_type.bound_argument_types, error);
 	if (best_function == DConstants::INVALID_INDEX) {
 		throw InternalException("Could not re-bind exported aggregate %s: %s", state_type.function_name, error);
 	}
-	auto &bound_aggr = aggr->functions[best_function];
+	auto bound_aggr = aggr->functions.GetFunctionByOffset(best_function);
+	if (bound_aggr.bind) {
+		// FIXME: this is really hacky
+		// but the aggregate state export needs a rework around how it handles more complex aggregates anyway
+		vector<unique_ptr<Expression>> args;
+		args.reserve(state_type.bound_argument_types.size());
+		for (auto &arg_type : state_type.bound_argument_types) {
+			args.push_back(make_unique<BoundConstantExpression>(Value(arg_type)));
+		}
+		auto bind_info = bound_aggr.bind(context, bound_aggr, args);
+		if (bind_info) {
+			throw BinderException("Aggregate function with bind info not supported yet in aggregate state export");
+		}
+	}
+
 	if (bound_aggr.return_type != state_type.return_type || bound_aggr.arguments != state_type.bound_argument_types) {
 		throw InternalException("Type mismatch for exported aggregate %s", state_type.function_name);
 	}
@@ -249,6 +270,24 @@ bool ExportAggregateFunctionBindData::Equals(const FunctionData &other_p) const 
 	return aggregate->Equals(other.aggregate.get());
 }
 
+static void ExportStateAggregateSerialize(FieldWriter &writer, const FunctionData *bind_data_p,
+                                          const AggregateFunction &function) {
+	throw NotImplementedException("FIXME: export state serialize");
+}
+static unique_ptr<FunctionData> ExportStateAggregateDeserialize(ClientContext &context, FieldReader &reader,
+                                                                AggregateFunction &bound_function) {
+	throw NotImplementedException("FIXME: export state deserialize");
+}
+
+static void ExportStateScalarSerialize(FieldWriter &writer, const FunctionData *bind_data_p,
+                                       const ScalarFunction &function) {
+	throw NotImplementedException("FIXME: export state serialize");
+}
+static unique_ptr<FunctionData> ExportStateScalarDeserialize(ClientContext &context, FieldReader &reader,
+                                                             ScalarFunction &bound_function) {
+	throw NotImplementedException("FIXME: export state deserialize");
+}
+
 unique_ptr<BoundAggregateExpression>
 ExportAggregateFunction::Bind(unique_ptr<BoundAggregateExpression> child_aggregate) {
 	auto &bound_function = child_aggregate->function;
@@ -264,7 +303,6 @@ ExportAggregateFunction::Bind(unique_ptr<BoundAggregateExpression> child_aggrega
 	// this should be required
 	D_ASSERT(bound_function.state_size);
 	D_ASSERT(bound_function.finalize);
-	D_ASSERT(!bound_function.window);
 
 	D_ASSERT(child_aggregate->function.return_type.id() != LogicalTypeId::INVALID);
 #ifdef DEBUG
@@ -275,7 +313,7 @@ ExportAggregateFunction::Bind(unique_ptr<BoundAggregateExpression> child_aggrega
 	auto export_bind_data = make_unique<ExportAggregateFunctionBindData>(child_aggregate->Copy());
 	aggregate_state_t state_type(child_aggregate->function.name, child_aggregate->function.return_type,
 	                             child_aggregate->function.arguments);
-	auto return_type = LogicalType::AGGREGATE_STATE(move(state_type));
+	auto return_type = LogicalType::AGGREGATE_STATE(std::move(state_type));
 
 	auto export_function =
 	    AggregateFunction("aggregate_state_export_" + bound_function.name, bound_function.arguments, return_type,
@@ -283,21 +321,32 @@ ExportAggregateFunction::Bind(unique_ptr<BoundAggregateExpression> child_aggrega
 	                      bound_function.combine, ExportAggregateFinalize, bound_function.simple_update,
 	                      /* can't bind this again */ nullptr, /* no dynamic state yet */ nullptr,
 	                      /* can't propagate statistics */ nullptr, nullptr);
+	export_function.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+	export_function.serialize = ExportStateAggregateSerialize;
+	export_function.deserialize = ExportStateAggregateDeserialize;
 
-	return make_unique<BoundAggregateExpression>(export_function, move(child_aggregate->children),
-	                                             move(child_aggregate->filter), move(export_bind_data),
-	                                             child_aggregate->distinct);
+	return make_unique<BoundAggregateExpression>(export_function, std::move(child_aggregate->children),
+	                                             std::move(child_aggregate->filter), std::move(export_bind_data),
+	                                             child_aggregate->aggr_type);
 }
 
 ScalarFunction ExportAggregateFunction::GetFinalize() {
-	return ScalarFunction("finalize", {LogicalTypeId::AGGREGATE_STATE}, LogicalTypeId::INVALID, AggregateStateFinalize,
-	                      false, BindAggregateState, nullptr, nullptr, InitFinalizeState);
+	auto result = ScalarFunction("finalize", {LogicalTypeId::AGGREGATE_STATE}, LogicalTypeId::INVALID,
+	                             AggregateStateFinalize, BindAggregateState, nullptr, nullptr, InitFinalizeState);
+	result.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+	result.serialize = ExportStateScalarSerialize;
+	result.deserialize = ExportStateScalarDeserialize;
+	return result;
 }
 
 ScalarFunction ExportAggregateFunction::GetCombine() {
-	return ScalarFunction("combine", {LogicalTypeId::AGGREGATE_STATE, LogicalTypeId::ANY},
-	                      LogicalTypeId::AGGREGATE_STATE, AggregateStateCombine, false, BindAggregateState, nullptr,
-	                      nullptr, InitCombineState);
+	auto result =
+	    ScalarFunction("combine", {LogicalTypeId::AGGREGATE_STATE, LogicalTypeId::ANY}, LogicalTypeId::AGGREGATE_STATE,
+	                   AggregateStateCombine, BindAggregateState, nullptr, nullptr, InitCombineState);
+	result.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+	result.serialize = ExportStateScalarSerialize;
+	result.deserialize = ExportStateScalarDeserialize;
+	return result;
 }
 
 } // namespace duckdb

@@ -16,22 +16,17 @@
 namespace duckdb {
 
 TableDataReader::TableDataReader(MetaBlockReader &reader, BoundCreateTableInfo &info) : reader(reader), info(info) {
-	info.data = make_unique<PersistentTableData>(info.Base().columns.size());
+	info.data = make_unique<PersistentTableData>(info.Base().columns.LogicalColumnCount());
 }
 
 void TableDataReader::ReadTableData() {
 	auto &columns = info.Base().columns;
-	D_ASSERT(columns.size() > 0);
+	D_ASSERT(!columns.empty());
 
 	// deserialize the total table statistics
-	info.data->column_stats.reserve(columns.size());
-	for (idx_t i = 0; i < columns.size(); i++) {
-		auto &col = columns[i];
-		// Have to use 'Generated()' here, storage_oid is uninitialized here
-		if (col.Generated()) {
-			continue;
-		}
-		info.data->column_stats.push_back(BaseStatistics::Deserialize(reader, columns[i].Type()));
+	info.data->column_stats.reserve(columns.PhysicalColumnCount());
+	for (auto &col : columns.Physical()) {
+		info.data->column_stats.push_back(BaseStatistics::Deserialize(reader, col.Type()));
 	}
 
 	// deserialize each of the individual row groups
@@ -39,7 +34,7 @@ void TableDataReader::ReadTableData() {
 	info.data->row_groups.reserve(row_group_count);
 	for (idx_t i = 0; i < row_group_count; i++) {
 		auto row_group_pointer = RowGroup::Deserialize(reader, columns);
-		info.data->row_groups.push_back(move(row_group_pointer));
+		info.data->row_groups.push_back(std::move(row_group_pointer));
 	}
 }
 

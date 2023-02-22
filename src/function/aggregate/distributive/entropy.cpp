@@ -112,11 +112,14 @@ struct EntropyFunctionString : EntropyFunctionBase {
 
 template <typename INPUT_TYPE, typename RESULT_TYPE>
 AggregateFunction GetEntropyFunction(const LogicalType &input_type, const LogicalType &result_type) {
-	return AggregateFunction::UnaryAggregateDestructor<EntropyState<INPUT_TYPE>, INPUT_TYPE, RESULT_TYPE,
-	                                                   EntropyFunction>(input_type, result_type);
+	auto fun =
+	    AggregateFunction::UnaryAggregateDestructor<EntropyState<INPUT_TYPE>, INPUT_TYPE, RESULT_TYPE, EntropyFunction>(
+	        input_type, result_type);
+	fun.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+	return fun;
 }
 
-AggregateFunction GetEntropyFunction(PhysicalType type) {
+AggregateFunction GetEntropyFunctionInternal(PhysicalType type) {
 	switch (type) {
 	case PhysicalType::UINT16:
 		return AggregateFunction::UnaryAggregateDestructor<EntropyState<uint16_t>, uint16_t, double, EntropyFunction>(
@@ -150,6 +153,12 @@ AggregateFunction GetEntropyFunction(PhysicalType type) {
 	default:
 		throw InternalException("Unimplemented approximate_count aggregate");
 	}
+}
+
+AggregateFunction GetEntropyFunction(PhysicalType type) {
+	auto fun = GetEntropyFunctionInternal(type);
+	fun.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+	return fun;
 }
 
 void EntropyFun::RegisterFunction(BuiltinFunctions &set) {

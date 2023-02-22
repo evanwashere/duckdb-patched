@@ -25,6 +25,7 @@ enum class CatalogType : uint8_t {
 	SEQUENCE_ENTRY = 6,
 	COLLATION_ENTRY = 7,
 	TYPE_ENTRY = 8,
+	DATABASE_ENTRY = 9,
 
 	// functions
 	TABLE_FUNCTION_ENTRY = 25,
@@ -40,6 +41,6 @@ enum class CatalogType : uint8_t {
 	DELETED_ENTRY = 51,
 };
 
-string CatalogTypeToString(CatalogType type);
+DUCKDB_API string CatalogTypeToString(CatalogType type);
 
 } // namespace duckdb

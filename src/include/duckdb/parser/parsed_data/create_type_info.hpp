@@ -16,14 +16,18 @@
 namespace duckdb {
 
 struct CreateTypeInfo : public CreateInfo {
-
 	CreateTypeInfo() : CreateInfo(CatalogType::TYPE_ENTRY) {
+	}
+	CreateTypeInfo(string name_p, LogicalType type_p)
+	    : CreateInfo(CatalogType::TYPE_ENTRY), name(std::move(name_p)), type(std::move(type_p)) {
 	}
 
 	//! Name of the Type
 	string name;
 	//! Logical Type
 	LogicalType type;
+	//! Used by create enum from query
+	unique_ptr<SQLStatement> query;
 
 public:
 	unique_ptr<CreateInfo> Copy() const override {
@@ -31,7 +35,15 @@ public:
 		CopyProperties(*result);
 		result->name = name;
 		result->type = type;
-		return move(result);
+		if (query) {
+			result->query = query->Copy();
+		}
+		return std::move(result);
+	}
+
+protected:
+	void SerializeInternal(Serializer &) const override {
+		throw NotImplementedException("Cannot serialize '%s'", CatalogTypeToString(CreateInfo::type));
 	}
 };
 

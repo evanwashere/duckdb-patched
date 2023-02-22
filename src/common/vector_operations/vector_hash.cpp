@@ -53,8 +53,8 @@ static inline void TemplatedLoopHash(Vector &input, Vector &result, const Select
 	} else {
 		result.SetVectorType(VectorType::FLAT_VECTOR);
 
-		VectorData idata;
-		input.Orrify(count, idata);
+		UnifiedVectorFormat idata;
+		input.ToUnifiedFormat(count, idata);
 
 		TightLoopHash<HAS_RSEL, T>((T *)idata.data, FlatVector::GetData<hash_t>(result), rsel, count, idata.sel,
 		                           idata.validity);
@@ -92,8 +92,8 @@ template <bool HAS_RSEL, bool FIRST_HASH>
 static inline void ListLoopHash(Vector &input, Vector &hashes, const SelectionVector *rsel, idx_t count) {
 	auto hdata = FlatVector::GetData<hash_t>(hashes);
 
-	VectorData idata;
-	input.Orrify(count, idata);
+	UnifiedVectorFormat idata;
+	input.ToUnifiedFormat(count, idata);
 	const auto ldata = (const list_entry_t *)idata.data;
 
 	// Hash the children into a temporary
@@ -101,7 +101,9 @@ static inline void ListLoopHash(Vector &input, Vector &hashes, const SelectionVe
 	const auto child_count = ListVector::GetListSize(input);
 
 	Vector child_hashes(LogicalType::HASH, child_count);
-	VectorOperations::Hash(child, child_hashes, child_count);
+	if (child_count > 0) {
+		VectorOperations::Hash(child, child_hashes, child_count);
+	}
 	auto chdata = FlatVector::GetData<hash_t>(child_hashes);
 
 	// Reduce the number of entries to check to the non-empty ones
@@ -218,7 +220,6 @@ static inline void HashTypeSwitch(Vector &input, Vector &result, const Selection
 	case PhysicalType::VARCHAR:
 		TemplatedLoopHash<HAS_RSEL, string_t>(input, result, rsel, count);
 		break;
-	case PhysicalType::MAP:
 	case PhysicalType::STRUCT:
 		StructLoopHash<HAS_RSEL, true>(input, result, rsel, count);
 		break;
@@ -288,8 +289,8 @@ void TemplatedLoopCombineHash(Vector &input, Vector &hashes, const SelectionVect
 		auto other_hash = HashOp::Operation(*ldata, ConstantVector::IsNull(input));
 		*hash_data = CombineHashScalar(*hash_data, other_hash);
 	} else {
-		VectorData idata;
-		input.Orrify(count, idata);
+		UnifiedVectorFormat idata;
+		input.ToUnifiedFormat(count, idata);
 		if (hashes.GetVectorType() == VectorType::CONSTANT_VECTOR) {
 			// mix constant with non-constant, first get the constant value
 			auto constant_hash = *ConstantVector::GetData<hash_t>(hashes);
@@ -350,7 +351,6 @@ static inline void CombineHashTypeSwitch(Vector &hashes, Vector &input, const Se
 	case PhysicalType::VARCHAR:
 		TemplatedLoopCombineHash<HAS_RSEL, string_t>(input, hashes, rsel, count);
 		break;
-	case PhysicalType::MAP:
 	case PhysicalType::STRUCT:
 		StructLoopHash<HAS_RSEL, false>(input, hashes, rsel, count);
 		break;

@@ -35,6 +35,11 @@ struct ExpressionState {
 public:
 	void AddChild(Expression *expr);
 	void Finalize();
+	Allocator &GetAllocator();
+	bool HasContext();
+	DUCKDB_API ClientContext &GetContext();
+
+	void Verify(ExpressionExecutorState &root);
 };
 
 struct ExecuteFunctionState : public ExpressionState {
@@ -44,17 +49,20 @@ struct ExecuteFunctionState : public ExpressionState {
 	unique_ptr<FunctionLocalState> local_state;
 
 public:
-	static FunctionLocalState *GetFunctionState(ExpressionState &state) {
+	DUCKDB_API static FunctionLocalState *GetFunctionState(ExpressionState &state) {
 		return ((ExecuteFunctionState &)state).local_state.get();
 	}
 };
 
 struct ExpressionExecutorState {
 	explicit ExpressionExecutorState(const string &name);
+
 	unique_ptr<ExpressionState> root_state;
-	ExpressionExecutor *executor;
+	ExpressionExecutor *executor = nullptr;
 	CycleCounter profiler;
 	string name;
+
+	void Verify();
 };
 
 } // namespace duckdb

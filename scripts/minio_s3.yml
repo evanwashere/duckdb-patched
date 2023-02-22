@@ -7,8 +7,8 @@ services:
       - "9000:9000"
       - "9001:9001"
     volumes:
-      - /data
-      - /root/.minio
+      - /tmp/minio_test_data:/data
+      - /tmp/minio_root_data:/root/.minio
     environment:
       - MINIO_ROOT_USER=duckdb_minio_admin
       - MINIO_ROOT_PASSWORD=duckdb_minio_admin_password
@@ -37,9 +37,18 @@ services:
         /usr/bin/mc admin user info myminio minio_duckdb_user
         /usr/bin/mc admin policy set myminio readwrite user=minio_duckdb_user
 
+        /usr/bin/mc admin user add myminio minio_duckdb_user_2 minio_duckdb_user_2_password
+        /usr/bin/mc admin user list myminio
+        /usr/bin/mc admin user info myminio minio_duckdb_user_2
+        /usr/bin/mc admin policy set myminio readwrite user=minio_duckdb_user_2
+
         /usr/bin/mc rb --force myminio/test-bucket
         /usr/bin/mc mb myminio/test-bucket
         /usr/bin/mc policy get myminio/test-bucket
+
+        /usr/bin/mc rb --force myminio/test-bucket_2
+        /usr/bin/mc mb myminio/test-bucket_2
+        /usr/bin/mc policy get myminio/test-bucket_2
 
         /usr/bin/mc rb --force myminio/test-bucket-public
         /usr/bin/mc mb myminio/test-bucket-public

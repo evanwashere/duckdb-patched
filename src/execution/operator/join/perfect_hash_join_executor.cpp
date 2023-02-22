@@ -7,7 +7,7 @@ namespace duckdb {
 
 PerfectHashJoinExecutor::PerfectHashJoinExecutor(const PhysicalHashJoin &join_p, JoinHashTable &ht_p,
                                                  PerfectHashJoinStats perfect_join_stats)
-    : join(join_p), ht(ht_p), perfect_join_statistics(move(perfect_join_stats)) {
+    : join(join_p), ht(ht_p), perfect_join_statistics(std::move(perfect_join_stats)) {
 }
 
 bool PerfectHashJoinExecutor::CanDoPerfectHashJoin() {
@@ -26,6 +26,9 @@ bool PerfectHashJoinExecutor::BuildPerfectHashTable(LogicalType &key_type) {
 	// and for duplicate_checking
 	bitmap_build_idx = unique_ptr<bool[]>(new bool[build_size]);
 	memset(bitmap_build_idx.get(), 0, sizeof(bool) * build_size); // set false
+
+	// pin all fixed-size blocks (variable-sized should still be pinned)
+	ht.PinAllBlocks();
 
 	// Now fill columns with build data
 	JoinHTScanState join_ht_state;
@@ -60,8 +63,7 @@ bool PerfectHashJoinExecutor::FullScanHashTable(JoinHTScanState &state, LogicalT
 		auto &vector = perfect_hash_table[i];
 		D_ASSERT(vector.GetType() == ht.build_types[i]);
 		const auto col_no = ht.condition_types.size() + i;
-		const auto col_offset = ht.layout.GetOffsets()[col_no];
-		RowOperations::Gather(tuples_addresses, sel_tuples, vector, sel_build, keys_count, col_offset, col_no,
+		RowOperations::Gather(tuples_addresses, sel_tuples, vector, sel_build, keys_count, ht.layout, col_no,
 		                      build_size);
 	}
 	return true;
@@ -99,8 +101,8 @@ bool PerfectHashJoinExecutor::TemplatedFillSelectionVectorBuild(Vector &source, 
 	}
 	auto min_value = perfect_join_statistics.build_min.GetValueUnsafe<T>();
 	auto max_value = perfect_join_statistics.build_max.GetValueUnsafe<T>();
-	VectorData vector_data;
-	source.Orrify(count, vector_data);
+	UnifiedVectorFormat vector_data;
+	source.ToUnifiedFormat(count, vector_data);
 	auto data = reinterpret_cast<T *>(vector_data.data);
 	// generate the selection vector
 	for (idx_t i = 0, sel_idx = 0; i < count; ++i) {
@@ -127,6 +129,16 @@ bool PerfectHashJoinExecutor::TemplatedFillSelectionVectorBuild(Vector &source, 
 //===--------------------------------------------------------------------===//
 class PerfectHashJoinState : public OperatorState {
 public:
+	PerfectHashJoinState(ClientContext &context, const PhysicalHashJoin &join) : probe_executor(context) {
+		join_keys.Initialize(Allocator::Get(context), join.condition_types);
+		for (auto &cond : join.conditions) {
+			probe_executor.AddExpression(*cond.left);
+		}
+		build_sel_vec.Initialize(STANDARD_VECTOR_SIZE);
+		probe_sel_vec.Initialize(STANDARD_VECTOR_SIZE);
+		seq_sel_vec.Initialize(STANDARD_VECTOR_SIZE);
+	}
+
 	DataChunk join_keys;
 	ExpressionExecutor probe_executor;
 	SelectionVector build_sel_vec;
@@ -134,16 +146,9 @@ public:
 	SelectionVector seq_sel_vec;
 };
 
-unique_ptr<OperatorState> PerfectHashJoinExecutor::GetOperatorState(ClientContext &context) {
-	auto state = make_unique<PerfectHashJoinState>();
-	state->join_keys.Initialize(join.condition_types);
-	for (auto &cond : join.conditions) {
-		state->probe_executor.AddExpression(*cond.left);
-	}
-	state->build_sel_vec.Initialize(STANDARD_VECTOR_SIZE);
-	state->probe_sel_vec.Initialize(STANDARD_VECTOR_SIZE);
-	state->seq_sel_vec.Initialize(STANDARD_VECTOR_SIZE);
-	return move(state);
+unique_ptr<OperatorState> PerfectHashJoinExecutor::GetOperatorState(ExecutionContext &context) {
+	auto state = make_unique<PerfectHashJoinState>(context.client, join);
+	return std::move(state);
 }
 
 OperatorResultType PerfectHashJoinExecutor::ProbePerfectHashTable(ExecutionContext &context, DataChunk &input,
@@ -219,8 +224,8 @@ void PerfectHashJoinExecutor::TemplatedFillSelectionVectorProbe(Vector &source, 
 	auto min_value = perfect_join_statistics.build_min.GetValueUnsafe<T>();
 	auto max_value = perfect_join_statistics.build_max.GetValueUnsafe<T>();
 
-	VectorData vector_data;
-	source.Orrify(count, vector_data);
+	UnifiedVectorFormat vector_data;
+	source.ToUnifiedFormat(count, vector_data);
 	auto data = reinterpret_cast<T *>(vector_data.data);
 	auto validity_mask = &vector_data.validity;
 	// build selection vector for non-dense build

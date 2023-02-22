@@ -3,22 +3,24 @@
 #include "duckdb/common/sort/sort.hpp"
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/main/client_context.hpp"
-#include "duckdb/storage/buffer_manager.hpp"
-
+#include "duckdb/parallel/base_pipeline_event.hpp"
 #include "duckdb/parallel/event.hpp"
+#include "duckdb/storage/buffer_manager.hpp"
 
 namespace duckdb {
 
-PhysicalOrder::PhysicalOrder(vector<LogicalType> types, vector<BoundOrderByNode> orders, idx_t estimated_cardinality)
-    : PhysicalOperator(PhysicalOperatorType::ORDER_BY, move(types), estimated_cardinality), orders(move(orders)) {
+PhysicalOrder::PhysicalOrder(vector<LogicalType> types, vector<BoundOrderByNode> orders, vector<idx_t> projections,
+                             idx_t estimated_cardinality)
+    : PhysicalOperator(PhysicalOperatorType::ORDER_BY, std::move(types), estimated_cardinality),
+      orders(std::move(orders)), projections(std::move(projections)) {
 }
 
 //===--------------------------------------------------------------------===//
 // Sink
 //===--------------------------------------------------------------------===//
-class OrderGlobalState : public GlobalSinkState {
+class OrderGlobalSinkState : public GlobalSinkState {
 public:
-	OrderGlobalState(BufferManager &buffer_manager, const PhysicalOrder &order, RowLayout &payload_layout)
+	OrderGlobalSinkState(BufferManager &buffer_manager, const PhysicalOrder &order, RowLayout &payload_layout)
 	    : global_sort_state(buffer_manager, order.orders, payload_layout) {
 	}
 
@@ -28,51 +30,49 @@ public:
 	idx_t memory_per_thread;
 };
 
-class OrderLocalState : public LocalSinkState {
+class OrderLocalSinkState : public LocalSinkState {
 public:
-	OrderLocalState() {
+	OrderLocalSinkState(ClientContext &context, const PhysicalOrder &op) : key_executor(context) {
+		// Initialize order clause expression executor and DataChunk
+		vector<LogicalType> key_types;
+		for (auto &order : op.orders) {
+			key_types.push_back(order.expression->return_type);
+			key_executor.AddExpression(*order.expression);
+		}
+		auto &allocator = Allocator::Get(context);
+		keys.Initialize(allocator, key_types);
+		payload.Initialize(allocator, op.types);
 	}
 
 public:
 	//! The local sort state
 	LocalSortState local_sort_state;
-	//! Local copy of the sorting expression executor
-	ExpressionExecutor executor;
-	//! Holds a vector of incoming sorting columns
-	DataChunk sort;
+	//! Key expression executor, and chunk to hold the vectors
+	ExpressionExecutor key_executor;
+	DataChunk keys;
+	//! Payload chunk to hold the vectors
+	DataChunk payload;
 };
 
 unique_ptr<GlobalSinkState> PhysicalOrder::GetGlobalSinkState(ClientContext &context) const {
 	// Get the payload layout from the return types
 	RowLayout payload_layout;
 	payload_layout.Initialize(types);
-	auto state = make_unique<OrderGlobalState>(BufferManager::GetBufferManager(context), *this, payload_layout);
+	auto state = make_unique<OrderGlobalSinkState>(BufferManager::GetBufferManager(context), *this, payload_layout);
 	// Set external (can be force with the PRAGMA)
 	state->global_sort_state.external = ClientConfig::GetConfig(context).force_external;
-	// Memory usage per thread should scale with max mem / num threads
-	// We take 1/4th of this, to be conservative
-	idx_t max_memory = BufferManager::GetBufferManager(context).GetMaxMemory();
-	idx_t num_threads = TaskScheduler::GetScheduler(context).NumberOfThreads();
-	state->memory_per_thread = (max_memory / num_threads) / 4;
-	return move(state);
+	state->memory_per_thread = GetMaxThreadMemory(context);
+	return std::move(state);
 }
 
 unique_ptr<LocalSinkState> PhysicalOrder::GetLocalSinkState(ExecutionContext &context) const {
-	auto result = make_unique<OrderLocalState>();
-	// Initialize order clause expression executor and DataChunk
-	vector<LogicalType> types;
-	for (auto &order : orders) {
-		types.push_back(order.expression->return_type);
-		result->executor.AddExpression(*order.expression);
-	}
-	result->sort.Initialize(types);
-	return move(result);
+	return make_unique<OrderLocalSinkState>(context.client, *this);
 }
 
 SinkResultType PhysicalOrder::Sink(ExecutionContext &context, GlobalSinkState &gstate_p, LocalSinkState &lstate_p,
                                    DataChunk &input) const {
-	auto &gstate = (OrderGlobalState &)gstate_p;
-	auto &lstate = (OrderLocalState &)lstate_p;
+	auto &gstate = (OrderGlobalSinkState &)gstate_p;
+	auto &lstate = (OrderLocalSinkState &)lstate_p;
 
 	auto &global_sort_state = gstate.global_sort_state;
 	auto &local_sort_state = lstate.local_sort_state;
@@ -83,14 +83,17 @@ SinkResultType PhysicalOrder::Sink(ExecutionContext &context, GlobalSinkState &g
 	}
 
 	// Obtain sorting columns
-	auto &sort = lstate.sort;
-	sort.Reset();
-	lstate.executor.Execute(input, sort);
+	auto &keys = lstate.keys;
+	keys.Reset();
+	lstate.key_executor.Execute(input, keys);
+
+	auto &payload = lstate.payload;
+	payload.ReferenceColumns(input, projections);
 
 	// Sink the data into the local sort state
-	sort.Verify();
+	keys.Verify();
 	input.Verify();
-	local_sort_state.SinkChunk(sort, input);
+	local_sort_state.SinkChunk(keys, payload);
 
 	// When sorting data reaches a certain size, we sort it
 	if (local_sort_state.SizeInBytes() >= gstate.memory_per_thread) {
@@ -100,15 +103,15 @@ SinkResultType PhysicalOrder::Sink(ExecutionContext &context, GlobalSinkState &g
 }
 
 void PhysicalOrder::Combine(ExecutionContext &context, GlobalSinkState &gstate_p, LocalSinkState &lstate_p) const {
-	auto &gstate = (OrderGlobalState &)gstate_p;
-	auto &lstate = (OrderLocalState &)lstate_p;
+	auto &gstate = (OrderGlobalSinkState &)gstate_p;
+	auto &lstate = (OrderLocalSinkState &)lstate_p;
 	gstate.global_sort_state.AddLocalState(lstate.local_sort_state);
 }
 
 class PhysicalOrderMergeTask : public ExecutorTask {
 public:
-	PhysicalOrderMergeTask(shared_ptr<Event> event_p, ClientContext &context, OrderGlobalState &state)
-	    : ExecutorTask(context), event(move(event_p)), context(context), state(state) {
+	PhysicalOrderMergeTask(shared_ptr<Event> event_p, ClientContext &context, OrderGlobalSinkState &state)
+	    : ExecutorTask(context), event(std::move(event_p)), context(context), state(state) {
 	}
 
 	TaskExecutionResult ExecuteTask(TaskExecutionMode mode) override {
@@ -123,21 +126,20 @@ public:
 private:
 	shared_ptr<Event> event;
 	ClientContext &context;
-	OrderGlobalState &state;
+	OrderGlobalSinkState &state;
 };
 
-class OrderMergeEvent : public Event {
+class OrderMergeEvent : public BasePipelineEvent {
 public:
-	OrderMergeEvent(OrderGlobalState &gstate_p, Pipeline &pipeline_p)
-	    : Event(pipeline_p.executor), gstate(gstate_p), pipeline(pipeline_p) {
+	OrderMergeEvent(OrderGlobalSinkState &gstate_p, Pipeline &pipeline_p)
+	    : BasePipelineEvent(pipeline_p), gstate(gstate_p) {
 	}
 
-	OrderGlobalState &gstate;
-	Pipeline &pipeline;
+	OrderGlobalSinkState &gstate;
 
 public:
 	void Schedule() override {
-		auto &context = pipeline.GetClientContext();
+		auto &context = pipeline->GetClientContext();
 
 		// Schedule tasks equal to the number of threads, which will each merge multiple partitions
 		auto &ts = TaskScheduler::GetScheduler(context);
@@ -147,7 +149,7 @@ public:
 		for (idx_t tnum = 0; tnum < num_threads; tnum++) {
 			merge_tasks.push_back(make_unique<PhysicalOrderMergeTask>(shared_from_this(), context, gstate));
 		}
-		SetTasks(move(merge_tasks));
+		SetTasks(std::move(merge_tasks));
 	}
 
 	void FinishEvent() override {
@@ -156,14 +158,14 @@ public:
 		global_sort_state.CompleteMergeRound();
 		if (global_sort_state.sorted_blocks.size() > 1) {
 			// Multiple blocks remaining: Schedule the next round
-			PhysicalOrder::ScheduleMergeTasks(pipeline, *this, gstate);
+			PhysicalOrder::ScheduleMergeTasks(*pipeline, *this, gstate);
 		}
 	}
 };
 
 SinkFinalizeType PhysicalOrder::Finalize(Pipeline &pipeline, Event &event, ClientContext &context,
                                          GlobalSinkState &gstate_p) const {
-	auto &state = (OrderGlobalState &)gstate_p;
+	auto &state = (OrderGlobalSinkState &)gstate_p;
 	auto &global_sort_state = state.global_sort_state;
 
 	if (global_sort_state.sorted_blocks.empty()) {
@@ -181,47 +183,90 @@ SinkFinalizeType PhysicalOrder::Finalize(Pipeline &pipeline, Event &event, Clien
 	return SinkFinalizeType::READY;
 }
 
-void PhysicalOrder::ScheduleMergeTasks(Pipeline &pipeline, Event &event, OrderGlobalState &state) {
+void PhysicalOrder::ScheduleMergeTasks(Pipeline &pipeline, Event &event, OrderGlobalSinkState &state) {
 	// Initialize global sort state for a round of merging
 	state.global_sort_state.InitializeMergeRound();
 	auto new_event = make_shared<OrderMergeEvent>(state, pipeline);
-	event.InsertEvent(move(new_event));
+	event.InsertEvent(std::move(new_event));
 }
 
 //===--------------------------------------------------------------------===//
 // Source
 //===--------------------------------------------------------------------===//
-class PhysicalOrderOperatorState : public GlobalSourceState {
+class PhysicalOrderGlobalSourceState : public GlobalSourceState {
 public:
-	//! Payload scanner
-	unique_ptr<PayloadScanner> scanner;
+	explicit PhysicalOrderGlobalSourceState(OrderGlobalSinkState &sink) : next_batch_index(0) {
+		auto &global_sort_state = sink.global_sort_state;
+		if (global_sort_state.sorted_blocks.empty()) {
+			total_batches = 0;
+		} else {
+			D_ASSERT(global_sort_state.sorted_blocks.size() == 1);
+			total_batches = global_sort_state.sorted_blocks[0]->payload_data->data_blocks.size();
+		}
+	}
+
+	idx_t MaxThreads() override {
+		return total_batches;
+	}
+
+public:
+	atomic<idx_t> next_batch_index;
+	idx_t total_batches;
 };
 
 unique_ptr<GlobalSourceState> PhysicalOrder::GetGlobalSourceState(ClientContext &context) const {
-	return make_unique<PhysicalOrderOperatorState>();
+	auto &sink = (OrderGlobalSinkState &)*this->sink_state;
+	return make_unique<PhysicalOrderGlobalSourceState>(sink);
 }
 
-void PhysicalOrder::GetData(ExecutionContext &context, DataChunk &chunk, GlobalSourceState &gstate,
-                            LocalSourceState &lstate) const {
-	auto &state = (PhysicalOrderOperatorState &)gstate;
-
-	if (!state.scanner) {
-		// Initialize scanner (if not yet initialized)
-		auto &gstate = (OrderGlobalState &)*this->sink_state;
-		auto &global_sort_state = gstate.global_sort_state;
-		if (global_sort_state.sorted_blocks.empty()) {
-			return;
-		}
-		state.scanner =
-		    make_unique<PayloadScanner>(*global_sort_state.sorted_blocks[0]->payload_data, global_sort_state);
+class PhysicalOrderLocalSourceState : public LocalSourceState {
+public:
+	explicit PhysicalOrderLocalSourceState(PhysicalOrderGlobalSourceState &gstate)
+	    : batch_index(gstate.next_batch_index++) {
 	}
 
-	// Scan the next data chunk
-	state.scanner->Scan(chunk);
+public:
+	idx_t batch_index;
+	unique_ptr<PayloadScanner> scanner;
+};
+
+unique_ptr<LocalSourceState> PhysicalOrder::GetLocalSourceState(ExecutionContext &context,
+                                                                GlobalSourceState &gstate_p) const {
+	auto &gstate = (PhysicalOrderGlobalSourceState &)gstate_p;
+	return make_unique<PhysicalOrderLocalSourceState>(gstate);
+}
+
+void PhysicalOrder::GetData(ExecutionContext &context, DataChunk &chunk, GlobalSourceState &gstate_p,
+                            LocalSourceState &lstate_p) const {
+	auto &gstate = (PhysicalOrderGlobalSourceState &)gstate_p;
+	auto &lstate = (PhysicalOrderLocalSourceState &)lstate_p;
+
+	if (lstate.scanner && lstate.scanner->Remaining() == 0) {
+		lstate.batch_index = gstate.next_batch_index++;
+		lstate.scanner = nullptr;
+	}
+
+	if (lstate.batch_index >= gstate.total_batches) {
+		return;
+	}
+
+	if (!lstate.scanner) {
+		auto &sink = (OrderGlobalSinkState &)*this->sink_state;
+		auto &global_sort_state = sink.global_sort_state;
+		lstate.scanner = make_unique<PayloadScanner>(global_sort_state, lstate.batch_index, true);
+	}
+
+	lstate.scanner->Scan(chunk);
+}
+
+idx_t PhysicalOrder::GetBatchIndex(ExecutionContext &context, DataChunk &chunk, GlobalSourceState &gstate_p,
+                                   LocalSourceState &lstate_p) const {
+	auto &lstate = (PhysicalOrderLocalSourceState &)lstate_p;
+	return lstate.batch_index;
 }
 
 string PhysicalOrder::ParamsToString() const {
-	string result;
+	string result = "ORDERS:\n";
 	for (idx_t i = 0; i < orders.size(); i++) {
 		if (i > 0) {
 			result += "\n";

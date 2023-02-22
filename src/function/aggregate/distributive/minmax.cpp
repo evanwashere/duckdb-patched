@@ -4,7 +4,6 @@
 #include "duckdb/common/operator/comparison_operators.hpp"
 #include "duckdb/common/value_operations/value_operations.hpp"
 #include "duckdb/common/vector_operations/aggregate_executor.hpp"
-#include "duckdb/common/vector_operations/vector_operations.hpp"
 #include "duckdb/common/operator/aggregate_operators.hpp"
 #include "duckdb/common/types/null_value.hpp"
 #include "duckdb/planner/expression.hpp"
@@ -19,39 +18,33 @@ struct MinMaxState {
 
 template <class OP>
 static AggregateFunction GetUnaryAggregate(LogicalType type) {
-	switch (type.id()) {
-	case LogicalTypeId::BOOLEAN:
+	switch (type.InternalType()) {
+	case PhysicalType::BOOL:
 		return AggregateFunction::UnaryAggregate<MinMaxState<int8_t>, int8_t, int8_t, OP>(type, type);
-	case LogicalTypeId::TINYINT:
+	case PhysicalType::INT8:
 		return AggregateFunction::UnaryAggregate<MinMaxState<int8_t>, int8_t, int8_t, OP>(type, type);
-	case LogicalTypeId::SMALLINT:
+	case PhysicalType::INT16:
 		return AggregateFunction::UnaryAggregate<MinMaxState<int16_t>, int16_t, int16_t, OP>(type, type);
-	case LogicalTypeId::DATE:
-	case LogicalTypeId::INTEGER:
+	case PhysicalType::INT32:
 		return AggregateFunction::UnaryAggregate<MinMaxState<int32_t>, int32_t, int32_t, OP>(type, type);
-	case LogicalTypeId::TIMESTAMP:
-	case LogicalTypeId::TIME:
-	case LogicalTypeId::TIMESTAMP_TZ:
-	case LogicalTypeId::TIME_TZ:
-	case LogicalTypeId::BIGINT:
-		return AggregateFunction::UnaryAggregate<MinMaxState<int64_t>, int64_t, int64_t, OP>(type, type, true);
-	case LogicalTypeId::UTINYINT:
-		return AggregateFunction::UnaryAggregate<MinMaxState<uint8_t>, uint8_t, uint8_t, OP>(type, type, true);
-	case LogicalTypeId::USMALLINT:
-		return AggregateFunction::UnaryAggregate<MinMaxState<uint16_t>, uint16_t, uint16_t, OP>(type, type, true);
-	case LogicalTypeId::UINTEGER:
-		return AggregateFunction::UnaryAggregate<MinMaxState<uint32_t>, uint32_t, uint32_t, OP>(type, type, true);
-	case LogicalTypeId::UBIGINT:
-		return AggregateFunction::UnaryAggregate<MinMaxState<uint64_t>, uint64_t, uint64_t, OP>(type, type, true);
-	case LogicalTypeId::HUGEINT:
-	case LogicalTypeId::UUID:
-		return AggregateFunction::UnaryAggregate<MinMaxState<hugeint_t>, hugeint_t, hugeint_t, OP>(type, type, true);
-	case LogicalTypeId::FLOAT:
-		return AggregateFunction::UnaryAggregate<MinMaxState<float>, float, float, OP>(type, type, true);
-	case LogicalTypeId::DOUBLE:
-		return AggregateFunction::UnaryAggregate<MinMaxState<double>, double, double, OP>(type, type, true);
-	case LogicalTypeId::INTERVAL:
-		return AggregateFunction::UnaryAggregate<MinMaxState<interval_t>, interval_t, interval_t, OP>(type, type, true);
+	case PhysicalType::INT64:
+		return AggregateFunction::UnaryAggregate<MinMaxState<int64_t>, int64_t, int64_t, OP>(type, type);
+	case PhysicalType::UINT8:
+		return AggregateFunction::UnaryAggregate<MinMaxState<uint8_t>, uint8_t, uint8_t, OP>(type, type);
+	case PhysicalType::UINT16:
+		return AggregateFunction::UnaryAggregate<MinMaxState<uint16_t>, uint16_t, uint16_t, OP>(type, type);
+	case PhysicalType::UINT32:
+		return AggregateFunction::UnaryAggregate<MinMaxState<uint32_t>, uint32_t, uint32_t, OP>(type, type);
+	case PhysicalType::UINT64:
+		return AggregateFunction::UnaryAggregate<MinMaxState<uint64_t>, uint64_t, uint64_t, OP>(type, type);
+	case PhysicalType::INT128:
+		return AggregateFunction::UnaryAggregate<MinMaxState<hugeint_t>, hugeint_t, hugeint_t, OP>(type, type);
+	case PhysicalType::FLOAT:
+		return AggregateFunction::UnaryAggregate<MinMaxState<float>, float, float, OP>(type, type);
+	case PhysicalType::DOUBLE:
+		return AggregateFunction::UnaryAggregate<MinMaxState<double>, double, double, OP>(type, type);
+	case PhysicalType::INTERVAL:
+		return AggregateFunction::UnaryAggregate<MinMaxState<interval_t>, interval_t, interval_t, OP>(type, type);
 	default:
 		throw InternalException("Unimplemented type for min/max aggregate");
 	}
@@ -217,9 +210,9 @@ struct MaxOperationString : public StringMinMaxBase {
 
 template <typename T, class OP>
 static bool TemplatedOptimumType(Vector &left, idx_t lidx, idx_t lcount, Vector &right, idx_t ridx, idx_t rcount) {
-	VectorData lvdata, rvdata;
-	left.Orrify(lcount, lvdata);
-	right.Orrify(rcount, rvdata);
+	UnifiedVectorFormat lvdata, rvdata;
+	left.ToUnifiedFormat(lcount, lvdata);
+	right.ToUnifiedFormat(rcount, rvdata);
 
 	lidx = lvdata.sel->get_index(lidx);
 	ridx = rvdata.sel->get_index(ridx);
@@ -275,7 +268,6 @@ static bool TemplatedOptimumValue(Vector &left, idx_t lidx, idx_t lcount, Vector
 		return TemplatedOptimumType<string_t, OP>(left, lidx, lcount, right, ridx, rcount);
 	case PhysicalType::LIST:
 		return TemplatedOptimumList<OP>(left, lidx, lcount, right, ridx, rcount);
-	case PhysicalType::MAP:
 	case PhysicalType::STRUCT:
 		return TemplatedOptimumStruct<OP>(left, lidx, lcount, right, ridx, rcount);
 	default:
@@ -288,9 +280,9 @@ static bool TemplatedOptimumStruct(Vector &left, idx_t lidx_p, idx_t lcount, Vec
                                    idx_t rcount) {
 	// STRUCT dictionaries apply to all the children
 	// so map the indexes first
-	VectorData lvdata, rvdata;
-	left.Orrify(lcount, lvdata);
-	right.Orrify(rcount, rvdata);
+	UnifiedVectorFormat lvdata, rvdata;
+	left.ToUnifiedFormat(lcount, lvdata);
+	right.ToUnifiedFormat(rcount, rvdata);
 
 	idx_t lidx = lvdata.sel->get_index(lidx_p);
 	idx_t ridx = rvdata.sel->get_index(ridx_p);
@@ -330,9 +322,9 @@ static bool TemplatedOptimumStruct(Vector &left, idx_t lidx_p, idx_t lcount, Vec
 
 template <class OP>
 static bool TemplatedOptimumList(Vector &left, idx_t lidx, idx_t lcount, Vector &right, idx_t ridx, idx_t rcount) {
-	VectorData lvdata, rvdata;
-	left.Orrify(lcount, lvdata);
-	right.Orrify(rcount, rvdata);
+	UnifiedVectorFormat lvdata, rvdata;
+	left.ToUnifiedFormat(lcount, lvdata);
+	right.ToUnifiedFormat(rcount, rvdata);
 
 	// Update the indexes and vector sizes for recursion.
 	lidx = lvdata.sel->get_index(lidx);
@@ -420,11 +412,11 @@ struct VectorMinMaxBase {
 	template <class STATE, class OP>
 	static void Update(Vector inputs[], AggregateInputData &, idx_t input_count, Vector &state_vector, idx_t count) {
 		auto &input = inputs[0];
-		VectorData idata;
-		input.Orrify(count, idata);
+		UnifiedVectorFormat idata;
+		input.ToUnifiedFormat(count, idata);
 
-		VectorData sdata;
-		state_vector.Orrify(count, sdata);
+		UnifiedVectorFormat sdata;
+		state_vector.ToUnifiedFormat(count, sdata);
 
 		auto states = (STATE **)sdata.data;
 		for (idx_t i = 0; i < count; i++) {
@@ -519,7 +511,7 @@ unique_ptr<FunctionData> BindDecimalMinMax(ClientContext &context, AggregateFunc
 		function = GetUnaryAggregate<OP>(LogicalType::HUGEINT);
 		break;
 	}
-	function.name = move(name);
+	function.name = std::move(name);
 	function.arguments[0] = decimal_type;
 	function.return_type = decimal_type;
 	return nullptr;
@@ -535,23 +527,37 @@ static AggregateFunction GetMinMaxFunction(const LogicalType &type) {
 }
 
 template <class OP, class OP_STRING, class OP_VECTOR>
-static void AddMinMaxOperator(AggregateFunctionSet &set) {
-	for (auto &type : LogicalType::AllTypes()) {
-		if (type.id() == LogicalTypeId::VARCHAR || type.id() == LogicalTypeId::BLOB || type.id() == LogicalType::JSON) {
-			set.AddFunction(
-			    AggregateFunction::UnaryAggregateDestructor<MinMaxState<string_t>, string_t, string_t, OP_STRING>(
-			        type.id(), type.id()));
-		} else if (type.id() == LogicalTypeId::DECIMAL) {
-			set.AddFunction(AggregateFunction({type}, type, nullptr, nullptr, nullptr, nullptr, nullptr, false, nullptr,
-			                                  BindDecimalMinMax<OP>));
-		} else if (type.id() == LogicalTypeId::LIST || type.id() == LogicalTypeId::MAP ||
-		           type.id() == LogicalTypeId::STRUCT) {
-			set.AddFunction(GetMinMaxFunction<OP_VECTOR, VectorMinMaxState>(type));
-
-		} else {
-			set.AddFunction(GetUnaryAggregate<OP>(type));
-		}
+static AggregateFunction GetMinMaxOperator(const LogicalType &type) {
+	if (type.InternalType() == PhysicalType::VARCHAR) {
+		return AggregateFunction::UnaryAggregateDestructor<MinMaxState<string_t>, string_t, string_t, OP_STRING>(
+		    type.id(), type.id());
+	} else if (type.InternalType() == PhysicalType::LIST || type.InternalType() == PhysicalType::STRUCT) {
+		return GetMinMaxFunction<OP_VECTOR, VectorMinMaxState>(type);
+	} else {
+		return GetUnaryAggregate<OP>(type);
 	}
+}
+
+template <class OP, class OP_STRING, class OP_VECTOR>
+unique_ptr<FunctionData> BindMinMax(ClientContext &context, AggregateFunction &function,
+                                    vector<unique_ptr<Expression>> &arguments) {
+	auto input_type = arguments[0]->return_type;
+	auto name = std::move(function.name);
+	function = GetMinMaxOperator<OP, OP_STRING, OP_VECTOR>(input_type);
+	function.name = std::move(name);
+	if (function.bind) {
+		return function.bind(context, function, arguments);
+	} else {
+		return nullptr;
+	}
+}
+
+template <class OP, class OP_STRING, class OP_VECTOR>
+static void AddMinMaxOperator(AggregateFunctionSet &set) {
+	set.AddFunction(AggregateFunction({LogicalTypeId::DECIMAL}, LogicalTypeId::DECIMAL, nullptr, nullptr, nullptr,
+	                                  nullptr, nullptr, nullptr, BindDecimalMinMax<OP>));
+	set.AddFunction(AggregateFunction({LogicalType::ANY}, LogicalType::ANY, nullptr, nullptr, nullptr, nullptr, nullptr,
+	                                  nullptr, BindMinMax<OP, OP_STRING, OP_VECTOR>));
 }
 
 void MinFun::RegisterFunction(BuiltinFunctions &set) {

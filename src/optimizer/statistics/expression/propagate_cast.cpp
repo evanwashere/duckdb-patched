@@ -9,13 +9,13 @@ static unique_ptr<BaseStatistics> StatisticsOperationsNumericNumericCast(const B
 	auto &input = (NumericStatistics &)*input_p;
 
 	Value min = input.min, max = input.max;
-	if (!min.TryCastAs(target) || !max.TryCastAs(target)) {
+	if (!min.DefaultTryCastAs(target) || !max.DefaultTryCastAs(target)) {
 		// overflow in cast: bailout
 		return nullptr;
 	}
-	auto stats = make_unique<NumericStatistics>(target, move(min), move(max), input.stats_type);
+	auto stats = make_unique<NumericStatistics>(target, std::move(min), std::move(max), input.stats_type);
 	stats->CopyBase(*input_p);
-	return move(stats);
+	return std::move(stats);
 }
 
 static unique_ptr<BaseStatistics> StatisticsNumericCastSwitch(const BaseStatistics *input, const LogicalType &target) {

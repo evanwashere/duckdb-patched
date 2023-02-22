@@ -16,64 +16,20 @@
 #include "duckdb/planner/parsed_data/bound_create_table_info.hpp"
 #include "duckdb/storage/data_table.hpp"
 #include "duckdb/storage/write_ahead_log.hpp"
+#include "duckdb/storage/storage_manager.hpp"
+#include "duckdb/main/attached_database.hpp"
+#include "duckdb/execution/index/art/art.hpp"
+#include "duckdb/catalog/catalog_entry/duck_index_entry.hpp"
 
 namespace duckdb {
 
-class ReplayState {
-public:
-	ReplayState(DatabaseInstance &db, ClientContext &context, Deserializer &source)
-	    : db(db), context(context), source(source), current_table(nullptr), deserialize_only(false),
-	      checkpoint_id(INVALID_BLOCK) {
-	}
-
-	DatabaseInstance &db;
-	ClientContext &context;
-	Deserializer &source;
-	TableCatalogEntry *current_table;
-	bool deserialize_only;
-	block_id_t checkpoint_id;
-
-public:
-	void ReplayEntry(WALType entry_type);
-
-private:
-	void ReplayCreateTable();
-	void ReplayDropTable();
-	void ReplayAlter();
-
-	void ReplayCreateView();
-	void ReplayDropView();
-
-	void ReplayCreateSchema();
-	void ReplayDropSchema();
-
-	void ReplayCreateType();
-	void ReplayDropType();
-
-	void ReplayCreateSequence();
-	void ReplayDropSequence();
-	void ReplaySequenceValue();
-
-	void ReplayCreateMacro();
-	void ReplayDropMacro();
-
-	void ReplayCreateTableMacro();
-	void ReplayDropTableMacro();
-
-	void ReplayUseTable();
-	void ReplayInsert();
-	void ReplayDelete();
-	void ReplayUpdate();
-	void ReplayCheckpoint();
-};
-
-bool WriteAheadLog::Replay(DatabaseInstance &database, string &path) {
-	auto initial_reader = make_unique<BufferedFileReader>(database.GetFileSystem(), path.c_str());
+bool WriteAheadLog::Replay(AttachedDatabase &database, string &path) {
+	auto initial_reader = make_unique<BufferedFileReader>(FileSystem::Get(database), path.c_str());
 	if (initial_reader->Finished()) {
 		// WAL is empty
 		return false;
 	}
-	Connection con(database);
+	Connection con(database.GetDatabase());
 	con.BeginTransaction();
 
 	// first deserialize the WAL to look for a checkpoint flag
@@ -105,8 +61,8 @@ bool WriteAheadLog::Replay(DatabaseInstance &database, string &path) {
 	initial_reader.reset();
 	if (checkpoint_state.checkpoint_id != INVALID_BLOCK) {
 		// there is a checkpoint flag: check if we need to deserialize the WAL
-		auto &manager = BlockManager::GetBlockManager(database);
-		if (manager.IsRootBlock(checkpoint_state.checkpoint_id)) {
+		auto &manager = database.GetStorageManager();
+		if (manager.IsCheckpointClean(checkpoint_state.checkpoint_id)) {
 			// the contents of the WAL have already been checkpointed
 			// we can safely truncate the WAL and ignore its contents
 			return true;
@@ -114,7 +70,7 @@ bool WriteAheadLog::Replay(DatabaseInstance &database, string &path) {
 	}
 
 	// we need to recover from the WAL: actually set up the replay state
-	BufferedFileReader reader(database.GetFileSystem(), path.c_str());
+	BufferedFileReader reader(FileSystem::Get(database), path.c_str());
 	ReplayState state(database, *con.context, reader);
 
 	// replay the WAL
@@ -200,6 +156,12 @@ void ReplayState::ReplayEntry(WALType entry_type) {
 	case WALType::DROP_TABLE_MACRO:
 		ReplayDropTableMacro();
 		break;
+	case WALType::CREATE_INDEX:
+		ReplayCreateIndex();
+		break;
+	case WALType::DROP_INDEX:
+		ReplayDropIndex();
+		break;
 	case WALType::USE_TABLE:
 		ReplayUseTable();
 		break;
@@ -221,7 +183,6 @@ void ReplayState::ReplayEntry(WALType entry_type) {
 	case WALType::DROP_TYPE:
 		ReplayDropType();
 		break;
-
 	default:
 		throw InternalException("Invalid WAL entry type!");
 	}
@@ -231,16 +192,15 @@ void ReplayState::ReplayEntry(WALType entry_type) {
 // Replay Table
 //===--------------------------------------------------------------------===//
 void ReplayState::ReplayCreateTable() {
-	auto info = TableCatalogEntry::Deserialize(source);
+	auto info = TableCatalogEntry::Deserialize(source, context);
 	if (deserialize_only) {
 		return;
 	}
 
 	// bind the constraints to the table again
 	auto binder = Binder::CreateBinder(context);
-	auto bound_info = binder->BindCreateTableInfo(move(info));
+	auto bound_info = binder->BindCreateTableInfo(std::move(info));
 
-	auto &catalog = Catalog::GetCatalog(context);
 	catalog.CreateTable(context, bound_info.get());
 }
 
@@ -254,7 +214,6 @@ void ReplayState::ReplayDropTable() {
 		return;
 	}
 
-	auto &catalog = Catalog::GetCatalog(context);
 	catalog.DropEntry(context, &info);
 }
 
@@ -263,7 +222,6 @@ void ReplayState::ReplayAlter() {
 	if (deserialize_only) {
 		return;
 	}
-	auto &catalog = Catalog::GetCatalog(context);
 	catalog.Alter(context, info.get());
 }
 
@@ -271,12 +229,11 @@ void ReplayState::ReplayAlter() {
 // Replay View
 //===--------------------------------------------------------------------===//
 void ReplayState::ReplayCreateView() {
-	auto entry = ViewCatalogEntry::Deserialize(source);
+	auto entry = ViewCatalogEntry::Deserialize(source, context);
 	if (deserialize_only) {
 		return;
 	}
 
-	auto &catalog = Catalog::GetCatalog(context);
 	catalog.CreateView(context, entry.get());
 }
 
@@ -288,7 +245,6 @@ void ReplayState::ReplayDropView() {
 	if (deserialize_only) {
 		return;
 	}
-	auto &catalog = Catalog::GetCatalog(context);
 	catalog.DropEntry(context, &info);
 }
 
@@ -302,7 +258,6 @@ void ReplayState::ReplayCreateSchema() {
 		return;
 	}
 
-	auto &catalog = Catalog::GetCatalog(context);
 	catalog.CreateSchema(context, &info);
 }
 
@@ -315,7 +270,6 @@ void ReplayState::ReplayDropSchema() {
 		return;
 	}
 
-	auto &catalog = Catalog::GetCatalog(context);
 	catalog.DropEntry(context, &info);
 }
 
@@ -328,7 +282,6 @@ void ReplayState::ReplayCreateType() {
 		return;
 	}
 
-	auto &catalog = Catalog::GetCatalog(context);
 	catalog.CreateType(context, info.get());
 }
 
@@ -342,7 +295,6 @@ void ReplayState::ReplayDropType() {
 		return;
 	}
 
-	auto &catalog = Catalog::GetCatalog(context);
 	catalog.DropEntry(context, &info);
 }
 
@@ -355,7 +307,6 @@ void ReplayState::ReplayCreateSequence() {
 		return;
 	}
 
-	auto &catalog = Catalog::GetCatalog(context);
 	catalog.CreateSequence(context, entry.get());
 }
 
@@ -368,7 +319,6 @@ void ReplayState::ReplayDropSequence() {
 		return;
 	}
 
-	auto &catalog = Catalog::GetCatalog(context);
 	catalog.DropEntry(context, &info);
 }
 
@@ -382,7 +332,6 @@ void ReplayState::ReplaySequenceValue() {
 	}
 
 	// fetch the sequence from the catalog
-	auto &catalog = Catalog::GetCatalog(context);
 	auto seq = catalog.GetEntry<SequenceCatalogEntry>(context, schema, name);
 	if (usage_count > seq->usage_count) {
 		seq->usage_count = usage_count;
@@ -394,12 +343,11 @@ void ReplayState::ReplaySequenceValue() {
 // Replay Macro
 //===--------------------------------------------------------------------===//
 void ReplayState::ReplayCreateMacro() {
-	auto entry = ScalarMacroCatalogEntry::Deserialize(source);
+	auto entry = ScalarMacroCatalogEntry::Deserialize(source, context);
 	if (deserialize_only) {
 		return;
 	}
 
-	auto &catalog = Catalog::GetCatalog(context);
 	catalog.CreateFunction(context, entry.get());
 }
 
@@ -412,7 +360,6 @@ void ReplayState::ReplayDropMacro() {
 		return;
 	}
 
-	auto &catalog = Catalog::GetCatalog(context);
 	catalog.DropEntry(context, &info);
 }
 
@@ -420,12 +367,11 @@ void ReplayState::ReplayDropMacro() {
 // Replay Table Macro
 //===--------------------------------------------------------------------===//
 void ReplayState::ReplayCreateTableMacro() {
-	auto entry = TableMacroCatalogEntry::Deserialize(source);
+	auto entry = TableMacroCatalogEntry::Deserialize(source, context);
 	if (deserialize_only) {
 		return;
 	}
 
-	auto &catalog = Catalog::GetCatalog(context);
 	catalog.CreateFunction(context, entry.get());
 }
 
@@ -438,7 +384,66 @@ void ReplayState::ReplayDropTableMacro() {
 		return;
 	}
 
-	auto &catalog = Catalog::GetCatalog(context);
+	catalog.DropEntry(context, &info);
+}
+
+//===--------------------------------------------------------------------===//
+// Replay Index
+//===--------------------------------------------------------------------===//
+void ReplayState::ReplayCreateIndex() {
+
+	auto info = IndexCatalogEntry::Deserialize(source, context);
+	if (deserialize_only) {
+		return;
+	}
+
+	// get the physical table to which we'll add the index
+	auto table = catalog.GetEntry<TableCatalogEntry>(context, info->schema, info->table->table_name);
+	auto &data_table = table->GetStorage();
+
+	// bind the parsed expressions
+	if (info->expressions.empty()) {
+		for (auto &parsed_expr : info->parsed_expressions) {
+			info->expressions.push_back(parsed_expr->Copy());
+		}
+	}
+	auto binder = Binder::CreateBinder(context);
+	auto expressions = binder->BindCreateIndexExpressions(table, info.get());
+
+	// create the empty index
+	unique_ptr<Index> index;
+	switch (info->index_type) {
+	case IndexType::ART: {
+		index = make_unique<ART>(info->column_ids, TableIOManager::Get(data_table), expressions, info->constraint_type,
+		                         data_table.db, true);
+		break;
+	}
+	default:
+		throw InternalException("Unimplemented index type");
+	}
+
+	// add the index to the catalog
+	auto index_entry = (DuckIndexEntry *)catalog.CreateIndex(context, info.get());
+	index_entry->index = index.get();
+	index_entry->info = data_table.info;
+	for (auto &parsed_expr : info->parsed_expressions) {
+		index_entry->parsed_expressions.push_back(parsed_expr->Copy());
+	}
+
+	// physically add the index to the data table storage
+	data_table.WALAddIndex(context, std::move(index), expressions);
+}
+
+void ReplayState::ReplayDropIndex() {
+
+	DropInfo info;
+	info.type = CatalogType::INDEX_ENTRY;
+	info.schema = source.Read<string>();
+	info.name = source.Read<string>();
+	if (deserialize_only) {
+		return;
+	}
+
 	catalog.DropEntry(context, &info);
 }
 
@@ -451,7 +456,6 @@ void ReplayState::ReplayUseTable() {
 	if (deserialize_only) {
 		return;
 	}
-	auto &catalog = Catalog::GetCatalog(context);
 	current_table = catalog.GetEntry<TableCatalogEntry>(context, schema_name, table_name);
 }
 
@@ -466,7 +470,7 @@ void ReplayState::ReplayInsert() {
 	}
 
 	// append to the current table
-	current_table->storage->Append(*current_table, context, chunk);
+	current_table->GetStorage().LocalAppend(*current_table, context, chunk);
 }
 
 void ReplayState::ReplayDelete() {
@@ -487,7 +491,7 @@ void ReplayState::ReplayDelete() {
 	// delete the tuples from the current table
 	for (idx_t i = 0; i < chunk.size(); i++) {
 		row_ids[0] = source_ids[i];
-		current_table->storage->Delete(*current_table, context, row_identifiers, 1);
+		current_table->GetStorage().Delete(*current_table, context, row_identifiers, 1);
 	}
 }
 
@@ -507,16 +511,16 @@ void ReplayState::ReplayUpdate() {
 		throw InternalException("Corrupt WAL: update without table");
 	}
 
-	if (column_path[0] >= current_table->columns.size()) {
+	if (column_path[0] >= current_table->GetColumns().PhysicalColumnCount()) {
 		throw InternalException("Corrupt WAL: column index for update out of bounds");
 	}
 
 	// remove the row id vector from the chunk
-	auto row_ids = move(chunk.data.back());
+	auto row_ids = std::move(chunk.data.back());
 	chunk.data.pop_back();
 
 	// now perform the update
-	current_table->storage->UpdateColumn(*current_table, context, row_ids, column_path, chunk);
+	current_table->GetStorage().UpdateColumn(*current_table, context, row_ids, column_path, chunk);
 }
 
 void ReplayState::ReplayCheckpoint() {
