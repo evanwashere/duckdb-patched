@@ -1,6 +1,6 @@
 #include <math.h>
 #include <string.h>
-#include "duckdb/main/capi_internal.hpp"
+#include "duckdb/main/capi/capi_internal.hpp"
 
 void duckffi_free(void* ptr) { free(ptr); }
 void duckffi_dfree(void* ptr) { duckdb_free(ptr); }
